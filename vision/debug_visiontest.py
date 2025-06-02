@@ -1,6 +1,17 @@
 """
-This script is for testing the bounding box accuracy of an object detection model using a camera feed.
-It includes features for edge detection, preprocessing visualization, and performance benchmarking.
+Vision System Debug and Testing Module.
+
+This module provides tools for debugging and testing the vision system:
+- Camera setup and configuration testing
+- Visual model inference testing
+- Performance benchmarking
+- Visualization utilities
+
+The module helps identify and diagnose issues in:
+- Camera connectivity and settings
+- Object detection accuracy
+- System latency and performance
+- Integration points between components
 """
 
 import cv2
@@ -17,6 +28,37 @@ from ObjectDetection import ObjectDetection
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class ImprovedDebugTest:
+    """
+    Enhanced vision system debugging and testing.
+    
+    This class provides tools for testing and debugging various components
+    of the vision system, with detailed logging and visualization.
+    
+    Parameters
+    ----------
+    log_level : str, optional
+        Logging level, by default "INFO"
+    save_results : bool, optional
+        Whether to save test results, by default True
+    
+    Attributes
+    ----------
+    camera : cv2.VideoCapture
+        OpenCV camera capture object
+    logger : logging.Logger
+        Logger for debug information
+    test_results : Dict
+        Dictionary storing test results
+        
+    Notes
+    -----
+    Supports testing of:
+    - Camera setup and streaming
+    - Object detection models
+    - Depth estimation
+    - System latency
+    """
+    
     def __init__(self):
         self.logger = logging.getLogger(__name__)
         self.logger.info("Starting Debug Test with BBox Accuracy Testing")
@@ -43,7 +85,27 @@ class ImprovedDebugTest:
         self.detection_times = []
         
     def setup_camera(self):
-        """Setup camera with debug info"""
+        """
+        Setup camera with debug info.
+        
+        This function:
+        - Tests multiple camera indices
+        - Configures optimal camera settings
+        - Verifies frame capture
+        - Warms up camera
+        
+        Raises
+        ------
+        RuntimeError
+            If no working camera is found
+            
+        Notes
+        -----
+        Tests camera indices 0-2
+        Sets resolution to 1280x720
+        Sets frame rate to 30 FPS
+        Configures exposure settings
+        """
         for idx in [0, 1, 2]:
             try:
                 self.logger.info(f"Trying camera {idx}...")
