@@ -26,7 +26,12 @@ class HandEyeCalibrator(Node):
     
     Parameters
     ----------
-    None : Uses ROS2 parameters for configuration
+    pipeline : rs.pipeline
+        RealSense camera pipeline
+    intrinsics : rs.intrinsics
+        RealSense camera intrinsics
+    eye_in_hand : bool, optional
+        True for camera mounted on end-effector, False for static camera, by default True
     
     Attributes
     ----------
@@ -40,6 +45,8 @@ class HandEyeCalibrator(Node):
         Current robot transformation matrix
     MARKER_SIZE_METERS : float
         Physical size of the ArUco marker in meters
+    eye_in_hand : bool
+        Configuration mode: True for eye-in-hand, False for eye-to-hand
         
     Notes
     -----
@@ -49,7 +56,7 @@ class HandEyeCalibrator(Node):
     - RealSense camera
     - ArUco markers (6x6, 250 dictionary)
     """
-    def __init__(self):
+    def __init__(self, pipeline: rs.pipeline, intrinsics: rs.intrinsics, eye_in_hand: bool = True):
         super().__init__('hand_eye_calibrator')
         
         # Setup logging
@@ -60,12 +67,16 @@ class HandEyeCalibrator(Node):
         # IMPORTANT: This MUST match the actual printed marker size.
         self.MARKER_SIZE_METERS = 0.05  # Default to 5cm
         
-        # Initialize RealSense
-        self.pipeline = rs.pipeline()
-        self.config = rs.config()
-        self.config.enable_stream(rs.stream.color, 848, 480, rs.format.bgr8, 30)
+        # Configuration mode
+        self.eye_in_hand = eye_in_hand
+        self.logger.info(f"Hand-eye calibrator initialized in {'EYE-IN-HAND' if eye_in_hand else 'EYE-TO-HAND'} mode")
         
-        # Initialize variables for calibration
+        # Use the existing RealSense pipeline and intrinsics
+        self.pipeline = pipeline
+        self.intrinsics = intrinsics
+        if not self.pipeline or not self.intrinsics:
+            raise ValueError("An active RealSense pipeline and camera intrinsics must be provided.")
+        
         self.robot_poses: List[np.ndarray] = []
         self.marker_poses: List[np.ndarray] = []
         self.current_robot_transform: Optional[np.ndarray] = None
@@ -138,7 +149,6 @@ class HandEyeCalibrator(Node):
             transform.transform.rotation.w
         ]
         
-        # Convert quaternion to rotation matrix
         R = self._quaternion_to_matrix(q)
         T[0:3, 0:3] = R
         
@@ -197,10 +207,8 @@ class HandEyeCalibrator(Node):
         corners, ids, _ = cv2.aruco.detectMarkers(gray, self.aruco_dict, parameters=self.aruco_params)
         
         if ids is not None and len(ids) > 0:
-            # Get camera matrix from RealSense
-            profile = self.pipeline.get_active_profile()
-            color_profile = profile.get_stream(rs.stream.color)
-            intrinsics = color_profile.as_video_stream_profile().get_intrinsics()
+            # Get camera matrix from the provided RealSense intrinsics
+            intrinsics = self.intrinsics
             
             camera_matrix = np.array([
                 [intrinsics.fx, 0, intrinsics.ppx],
@@ -218,7 +226,6 @@ class HandEyeCalibrator(Node):
                 dist_coeffs
             )
             
-            # Convert to transformation matrix
             R, _ = cv2.Rodrigues(rvecs[0])
             T = np.eye(4)
             T[0:3, 0:3] = R
@@ -247,24 +254,32 @@ class HandEyeCalibrator(Node):
            - Wait for robot movement
         3. Show visualization
         4. Clean up resources
+        
+        For eye-in-hand: Move robot to different poses while marker is stationary
+        For eye-to-hand: Move robot with marker to different poses while camera is stationary
         """
-        self.logger.info(f"Starting calibration data collection. Need {num_poses} poses.")
+        mode_str = "eye-in-hand" if self.eye_in_hand else "eye-to-hand"
+        self.logger.info(f"Starting {mode_str} calibration data collection. Need {num_poses} poses.")
+        
+        if self.eye_in_hand:
+            self.logger.info("Eye-in-hand mode: Keep ArUco marker stationary, move robot to observe from different angles")
+        else:
+            self.logger.info("Eye-to-hand mode: Move robot with marker attached, camera observes from fixed position")
+            
         self.robot_poses = []
         self.marker_poses = []
         
         try:
-            # Start RealSense pipeline
-            self.pipeline.start(self.config)
+            # The pipeline is already started by the main system
             
             while len(self.robot_poses) < num_poses:
-                # Get frames
+                # Get frames from the existing pipeline
                 frames = self.pipeline.wait_for_frames()
                 color_frame = frames.get_color_frame()
                 
                 if not color_frame:
                     continue
                 
-                # Convert to numpy array
                 color_image = np.asanyarray(color_frame.get_data())
                 
                 # Detect marker
@@ -285,7 +300,7 @@ class HandEyeCalibrator(Node):
                     break
         
         finally:
-            self.pipeline.stop()
+            # Do not stop the pipeline here, it's managed externally
             cv2.destroyAllWindows()
     
     def compute_calibration(self) -> Optional[np.ndarray]:
@@ -295,7 +310,9 @@ class HandEyeCalibrator(Node):
         Returns
         -------
         Optional[np.ndarray]
-            4x4 transformation matrix (camera_to_robot_base or robot_base_to_camera),
+            4x4 transformation matrix:
+            - For eye-in-hand: T_gripper_camera (camera relative to gripper)
+            - For eye-to-hand: T_camera_base (camera relative to robot base)
             or None if calibration fails.
         """
         if len(self.robot_poses) < 4 or len(self.marker_poses) < 4:
@@ -307,13 +324,6 @@ class HandEyeCalibrator(Node):
             return None
 
         self.logger.info(f"Computing hand-eye calibration with {len(self.robot_poses)} poses.")
-        
-        # Convert poses to the format required by OpenCV
-        # Robot poses are typically T_base_effector
-        # Marker poses are T_camera_marker
-        
-        # We need R_gripper2base and t_gripper2base (from robot_poses)
-        # and R_target2cam and t_target2cam (from marker_poses)
         
         R_gripper2base = []
         t_gripper2base = []
@@ -327,135 +337,71 @@ class HandEyeCalibrator(Node):
             R_target2cam.append(pose_matrix[:3, :3])
             t_target2cam.append(pose_matrix[:3, 3].reshape(3, 1))
             
-        # Placeholder for choosing calibration method.
-        # Common methods: cv2.CALIB_HAND_EYE_TSAI, cv2.CALIB_HAND_EYE_PARK, 
-        # cv2.CALIB_HAND_EYE_HORAUD, cv2.CALIB_HAND_EYE_DANIILIDIS (often good).
-        # The choice depends on whether the camera is mounted on the hand or static.
-        # This example assumes Eye-to-Hand (camera is static, marker on robot).
-        # If Eye-in-Hand (camera on gripper, marker is static), then the inputs to
-        # calibrateHandEye might need to be T_base_gripper and T_marker_camera (inverted).
-        # For Eye-to-Hand, we need T_base_gripper and T_camera_target.
-        
-        # Assuming Eye-to-Hand setup:
-        # R_base_gripper, t_base_gripper
-        # R_cam_target, t_cam_target
-        # Result is T_cam_base (R_cam_base, t_cam_base)
-        
-        # If the setup is Eye-in-Hand (camera on gripper, marker is static in world):
-        # We have T_base_gripper and T_camera_marker.
-        # We need to provide T_base_gripper and T_marker_camera (which is inv(T_camera_marker)).
-        # The function then solves for T_gripper_camera.
-        # Let's assume an Eye-to-Hand setup for now, where the camera is static and the marker moves with the robot.
-        # The robot_poses are T_base_tool0 and marker_poses are T_camera_marker.
-        # We want to find T_camera_base.
-        # cv2.calibrateHandEye expects:
-        # R_gripper2base, t_gripper2base (list of rotations and translations of effector relative to base)
-        # R_target2cam, t_target2cam (list of rotations and translations of target relative to camera)
-        # It computes R_cam2gripper, t_cam2gripper OR R_base2cam, t_base2cam depending on method.
-        # The documentation for OpenCV's calibrateHandEye can be a bit confusing regarding frame definitions.
-        # Typically for Eye-to-Hand (camera is base, target is on gripper):
-        #   Input: T_world_camera (list of gripper poses relative to robot base)
-        #          T_marker_camera (list of marker poses relative to camera)
-        #   Output: T_camera_base (transformation from camera to robot base)
-        # Let's assume the interpretation where:
-        # robot_poses are T_base_effector (effector is where marker is, or effector moves the camera)
-        # marker_poses are T_camera_target (target is the calibration pattern)
-        # If camera is static and marker is on effector (Eye-to-Hand for T_base_camera):
-        #   We input R_base_effector, t_base_effector
-        #   We input R_target_camera, t_target_camera (target is marker)
-        #   It solves for R_effector_camera, t_effector_camera (transformation from effector to camera)
-        #   This would be if the 'camera' is the calibration target and 'gripper' is the camera
-        #   Let's use the common setup: Camera is 'world', Gripper is 'camera', target is 'marker' on robot.
-        #   No, that's not right.
-        # Standard Eye-to-Hand: Robot base is 'base', camera is 'camera', marker is on 'gripper'.
-        # We collect (T_base_gripper_i, T_camera_marker_i) pairs.
-        # We want to find T_camera_base.
-        # OpenCV's `calibrateHandEye` typically solves for X in AX=ZB.
-        # A = T_gripper_base (gripper in base frame), B = T_target_camera (target in camera frame)
-        # Z = T_camera_base (camera in base frame) - if eye-on-base (static camera)
-        # X = T_target_gripper (target in gripper frame) - fixed transform we are calibrating for, or T_base_camera
-        
-        # According to OpenCV docs for cv2.calibrateHandEye:
-        # R_gripper2base, t_gripper2base: rotations and translations of the gripper with respect to the robot base.
-        # R_target2cam, t_target2cam: rotations and translations of the calibration target with respect to the camera.
-        # It computes R_base2cam, t_base2cam (or R_cam2gripper, t_cam2gripper for eye-in-hand)
-        
-        # For Eye-to-Hand (static camera, target on robot end-effector):
-        # We are looking for T_camera_base (or T_base_camera).
-        # Input R_gripper2base should be R_base_gripper.
-        # Input R_target2cam should be R_camera_target.
-        # Output R_cam2base, t_cam2base
-        
-        # Let's stick to the variable names from the function signature for clarity with OpenCV docs
-        # self.robot_poses are T_base_tool0 (tool0 is gripper)
-        # self.marker_poses are T_camera_marker (marker is target)
-        
-        # So, R_gripper2base needs to be R_base_tool0
-        # And R_target2cam needs to be R_camera_marker
-        
-        # The method chosen affects which transform is solved for.
-        # For CALIB_HAND_EYE_DANIILIDIS (and others), for eye-to-hand (camera fixed, pattern on robot):
-        # It solves AX = ZB where X is the unknown hand-eye transformation (e.g. T_tool_camera)
-        # A is T_base_tool, Z is T_base_camera, B is T_pattern_camera
-        # No, this is not the standard AX=XB setup.
-        # The most common formulation is AX = XB, where:
-        # A: Transformation from robot base to end-effector (T_base_ee)
-        # B: Transformation from camera to marker (T_cam_marker)
-        # X: Transformation from end-effector to camera (T_ee_cam) --- for eye-in-hand
-        # OR
-        # X: Transformation from robot base to camera (T_base_cam) --- for eye-to-hand
-
-        # Let's assume Eye-to-Hand: camera is stationary, marker on end-effector. We want T_base_camera.
-        # R_base2gripper_list = R_gripper2base (from self.robot_poses)
-        # t_base2gripper_list = t_gripper2base (from self.robot_poses)
-        # R_target2camera_list = R_target2cam (from self.marker_poses)
-        # t_target2camera_list = t_target2cam (from self.marker_poses)
-
         try:
-            # For Eye-to-Hand, we want to find the transform from the camera to the robot base (T_camera_base)
-            # Or robot base to camera (T_base_camera).
-            # The cv2.calibrateHandEye function with most methods (e.g., TSAI, PARK, HORAUD, DANIILIDIS)
-            # computes T_gripper_camera when given T_base_gripper and T_marker_camera.
-            # This is for an Eye-in-Hand setup (camera on gripper).
-            
-            # If our setup is Eye-to-Hand (camera is static, observes marker on gripper):
-            # We have T_base_gripper (from robot_poses)
-            # We have T_camera_marker (from marker_poses)
-            # We want to find T_camera_base.
-            # To use cv2.calibrateHandEye, we might need to invert some transformations
-            # or use a solver that directly computes T_camera_base.
-            
-            # Let's use the formulation that solves for T_base_cam (denoted as X).
-            # A_i * X = X * B_i
-            # Where A_i is T_gripper_i_gripper_j (relative motion of gripper)
-            # And B_i is T_camera_marker_i_camera_marker_j (relative motion of marker in camera frame)
-            # This is not what cv2.calibrateHandEye takes directly.
-
-            # Sticking to OpenCV's direct input convention for Eye-to-Hand:
-            # R_gripper2base, t_gripper2base => list of T_base_gripper
-            # R_target2cam, t_target2cam   => list of T_camera_target
-            # The function will return R_cam2base, t_cam2base
-            
-            # Using default Daniilidis method
-            calibration_method = cv2.CALIB_HAND_EYE_DANIILIDIS 
-            self.logger.info(f"Using calibration method: DANIILIDIS")
-            
-            R_cam2base, t_cam2base = cv2.calibrateHandEye(
-                R_gripper2base=R_gripper2base, # List of R_base_gripper
-                t_gripper2base=t_gripper2base, # List of t_base_gripper
-                R_target2cam=R_target2cam,     # List of R_camera_target
-                t_target2cam=t_target2cam,     # List of t_camera_target
-                method=calibration_method
-            )
-            
-            # The returned R_cam2base, t_cam2base is T_camera_base
-            T_camera_base = np.eye(4)
-            T_camera_base[:3, :3] = R_cam2base
-            T_camera_base[:3, 3] = t_cam2base.ravel()
-            
-            self.logger.info("Hand-eye calibration successful.")
-            self.logger.info(f"T_camera_base:\n{T_camera_base}")
-            return T_camera_base
+            if self.eye_in_hand:
+                # Eye-in-hand: Camera mounted on gripper, marker is stationary
+                # We have T_base_gripper and T_camera_marker
+                # We want to find T_gripper_camera
+                # 
+                # The equation is: T_base_gripper * T_gripper_camera = T_base_camera * T_camera_marker
+                # Rearranging: T_base_gripper1^-1 * T_base_gripper2 * T_gripper_camera = T_gripper_camera * T_camera_marker1^-1 * T_camera_marker2
+                # This is the AX = XB form where X = T_gripper_camera
+                
+                self.logger.info("Computing eye-in-hand calibration (T_gripper_camera)")
+                
+                # Need to invert marker poses for eye-in-hand
+                R_cam2target = []
+                t_cam2target = []
+                for R, t in zip(R_target2cam, t_target2cam):
+                    R_inv = R.T
+                    t_inv = -R_inv @ t
+                    R_cam2target.append(R_inv)
+                    t_cam2target.append(t_inv)
+                
+                # Compute T_gripper_camera
+                R_gripper2cam, t_gripper2cam = cv2.calibrateHandEye(
+                    R_gripper2base=R_gripper2base,
+                    t_gripper2base=t_gripper2base,
+                    R_target2cam=R_cam2target,  # Using inverted poses
+                    t_target2cam=t_cam2target,
+                    method=cv2.CALIB_HAND_EYE_TSAI  # TSAI method often works well for eye-in-hand
+                )
+                
+                # Build transformation matrix T_gripper_camera
+                T_gripper_camera = np.eye(4)
+                T_gripper_camera[:3, :3] = R_gripper2cam
+                T_gripper_camera[:3, 3] = t_gripper2cam.ravel()
+                
+                self.logger.info("Eye-in-hand calibration successful.")
+                self.logger.info(f"T_gripper_camera:\n{T_gripper_camera}")
+                
+                # Also compute and log the camera position relative to gripper
+                cam_pos_in_gripper = T_gripper_camera[:3, 3]
+                self.logger.info(f"Camera position in gripper frame: [{cam_pos_in_gripper[0]:.3f}, {cam_pos_in_gripper[1]:.3f}, {cam_pos_in_gripper[2]:.3f}] meters")
+                
+                return T_gripper_camera
+                
+            else:
+                # Eye-to-hand: Camera is stationary, marker on gripper
+                self.logger.info("Computing eye-to-hand calibration (T_camera_base)")
+                
+                calibration_method = cv2.CALIB_HAND_EYE_DANIILIDIS 
+                
+                R_cam2base, t_cam2base = cv2.calibrateHandEye(
+                        R_gripper2base=R_gripper2base,
+                        t_gripper2base=t_gripper2base,
+                        R_target2cam=R_target2cam,
+                        t_target2cam=t_target2cam,
+                    method=calibration_method
+                )
+                
+                T_camera_base = np.eye(4)
+                T_camera_base[:3, :3] = R_cam2base
+                T_camera_base[:3, 3] = t_cam2base.ravel()
+                
+                self.logger.info("Eye-to-hand calibration successful.")
+                self.logger.info(f"T_camera_base:\n{T_camera_base}")
+                return T_camera_base
             
         except cv2.error as e:
             self.logger.error(f"OpenCV calibration failed: {e}")
@@ -477,7 +423,14 @@ class HandEyeCalibrator(Node):
             
         Notes
         -----
-        Saves matrix in .npz format for easy loading
+        Saves matrix in .npz format with metadata about calibration type
         """
-        np.savez(file_path, T_base_to_camera=T)
-        self.logger.info(f"Saved calibration to {file_path}") 
+        save_data = {
+            'T_base_to_camera': T,  # Keep key name for compatibility
+            'calibration_type': 'eye_in_hand' if self.eye_in_hand else 'eye_to_hand',
+            'is_eye_in_hand': self.eye_in_hand
+        }
+        np.savez(file_path, **save_data)
+        
+        calib_type = "T_gripper_camera" if self.eye_in_hand else "T_camera_base"
+        self.logger.info(f"Saved {calib_type} calibration to {file_path}") 

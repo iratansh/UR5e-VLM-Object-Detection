@@ -46,6 +46,10 @@ class HandEyeCalibrator(Node):
         List of detected marker poses
     current_robot_transform : Optional[np.ndarray]
         Current robot transformation matrix
+    eye_in_hand : bool
+        Whether the configuration is eye-in-hand
+    marker_size_meters : float
+        Size of the ArUco markers in meters
         
     Notes
     -----
@@ -55,22 +59,22 @@ class HandEyeCalibrator(Node):
     - RealSense camera
     - ArUco markers (6x6, 250 dictionary)
     """
-    def __init__(self):
+    def __init__(self, pipeline, intrinsics, eye_in_hand=True):
         super().__init__('hand_eye_calibrator')
         
         # Setup logging
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
         
-        # Initialize RealSense
-        self.pipeline = rs.pipeline()
+        self.pipeline = pipeline
         self.config = rs.config()
         self.config.enable_stream(rs.stream.color, 848, 480, rs.format.bgr8, 30)
         
-        # Initialize variables for calibration
         self.robot_poses: List[np.ndarray] = []
         self.marker_poses: List[np.ndarray] = []
         self.current_robot_transform: Optional[np.ndarray] = None
+        self.eye_in_hand = eye_in_hand
+        self.marker_size_meters = 0.05  # Default marker size
         
         # ArUco marker setup
         self.aruco_dict = cv2.aruco.Dictionary_get(cv2.aruco.DICT_6X6_250)
@@ -140,7 +144,6 @@ class HandEyeCalibrator(Node):
             transform.transform.rotation.w
         ]
         
-        # Convert quaternion to rotation matrix
         R = self._quaternion_to_matrix(q)
         T[0:3, 0:3] = R
         
@@ -200,8 +203,8 @@ class HandEyeCalibrator(Node):
         
         if ids is not None and len(ids) > 0:
             # Get camera matrix from RealSense
-            profile = self.pipeline.get_active_profile()
-            color_profile = profile.get_stream(rs.stream.color)
+            color_profile = self.pipeline.get_active_profile()
+            color_profile = color_profile.get_stream(rs.stream.color)
             intrinsics = color_profile.as_video_stream_profile().get_intrinsics()
             
             camera_matrix = np.array([
@@ -215,12 +218,11 @@ class HandEyeCalibrator(Node):
             # Estimate marker pose
             rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(
                 corners,
-                0.05,  # Marker size in meters
+                self.marker_size_meters,  # Marker size in meters
                 camera_matrix,
                 dist_coeffs
             )
             
-            # Convert to transformation matrix
             R, _ = cv2.Rodrigues(rvecs[0])
             T = np.eye(4)
             T[0:3, 0:3] = R
@@ -255,7 +257,6 @@ class HandEyeCalibrator(Node):
         self.marker_poses = []
         
         try:
-            # Start RealSense pipeline
             self.pipeline.start(self.config)
             
             while len(self.robot_poses) < num_poses:
@@ -266,10 +267,8 @@ class HandEyeCalibrator(Node):
                 if not color_frame:
                     continue
                 
-                # Convert to numpy array
                 color_image = np.asanyarray(color_frame.get_data())
                 
-                # Detect marker
                 marker_pose = self.detect_marker(color_image)
                 
                 if marker_pose is not None and self.current_robot_transform is not None:
@@ -312,7 +311,6 @@ class HandEyeCalibrator(Node):
         if len(self.robot_poses) < 3:
             raise ValueError("Need at least 3 poses for calibration")
         
-        # Convert poses to cv2 format
         R_gripper2base = []
         t_gripper2base = []
         R_target2cam = []
@@ -331,7 +329,6 @@ class HandEyeCalibrator(Node):
             method=cv2.CALIB_HAND_EYE_PARK
         )
         
-        # Create transformation matrix
         T_base2cam = np.eye(4)
         T_base2cam[0:3, 0:3] = R_base2cam
         T_base2cam[0:3, 3] = t_base2cam.ravel()
@@ -358,23 +355,59 @@ class HandEyeCalibrator(Node):
 
 def main():
     parser = argparse.ArgumentParser(description='Perform hand-eye calibration')
-    parser.add_argument('--poses', type=int, default=10, help='Number of poses to collect')
-    parser.add_argument('--output', type=str, default='hand_eye_calib.npz', help='Output file path')
+    parser.add_argument('--num-poses', type=int, default=10, help='Number of calibration poses')
+    parser.add_argument('--save-file', type=str, default='hand_eye_calib.npz', help='Output calibration file')
+    parser.add_argument('--marker-size', type=float, default=0.05, help='ArUco marker size in meters')
+    parser.add_argument('--eye-in-hand', action='store_true', default=True, help='Use eye-in-hand configuration (default: True)')
+    parser.add_argument('--eye-to-hand', action='store_true', help='Use eye-to-hand configuration')
     args = parser.parse_args()
     
+    # Determine configuration mode
+    eye_in_hand = True  # Default
+    if args.eye_to_hand:
+        eye_in_hand = False
+    
+    # Initialize ROS
     rclpy.init()
     
+    pipeline = rs.pipeline()
+    config = rs.config()
+    
+    # Configure streams
+    config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+    config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+    
+    profile = pipeline.start(config)
+    
+    # Get camera intrinsics
+    color_stream = profile.get_stream(rs.stream.color)
+    intrinsics = color_stream.as_video_stream_profile().get_intrinsics()
+    
     try:
-        calibrator = HandEyeCalibrator()
+        # Create calibrator with eye-in-hand configuration
+        calibrator = HandEyeCalibrator(pipeline, intrinsics, eye_in_hand=eye_in_hand)
         
-        # Collect calibration data
-        calibrator.collect_calibration_data(args.poses)
+        calibrator.MARKER_SIZE_METERS = args.marker_size
+        
+        # Run calibration
+        logger.info(f"Starting {'eye-in-hand' if eye_in_hand else 'eye-to-hand'} calibration with {args.num_poses} poses")
+        logger.info(f"Marker size: {args.marker_size} meters")
+        
+        calibrator.collect_calibration_data(args.num_poses)
         
         # Compute calibration
-        T_base2cam = calibrator.compute_calibration()
+        T_result = calibrator.compute_calibration()
         
-        # Save calibration
-        calibrator.save_calibration(T_base2cam, args.output)
+        if T_result is not None:
+            calibrator.save_calibration(T_result, args.save_file)
+            logger.info(f"✅ Calibration saved to {args.save_file}")
+            
+            # Display results
+            if eye_in_hand:
+                logger.info("Transformation from gripper to camera (T_gripper_camera):")
+            else:
+                logger.info("Transformation from camera to base (T_camera_base):")
+            logger.info(f"\n{T_result}")
         
     finally:
         rclpy.shutdown()

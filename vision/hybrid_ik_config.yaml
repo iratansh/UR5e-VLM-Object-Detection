@@ -1,0 +1,101 @@
+# Hybrid IK Configuration for UnifiedVisionSystem
+# ===============================================
+# This file contains configuration parameters for the hybrid IK system
+# integrated with the UnifiedVisionSystem.
+
+# Hybrid IK System Settings
+hybrid_ik:
+  # Enable hybrid IK system (ur_ikfast + numerical)
+  enable_hybrid_ik: true
+  
+  # Enable approximation for unreachable poses (safer to disable for initial tests)
+  ik_enable_approximation: true
+  
+  # Maximum position error for approximations (mm)
+  ik_max_position_error_mm: 5.0
+  
+  # IK solving timeout (ms) - increased for initial safety
+  ik_timeout_ms: 100.0
+  
+  # Enable debug output for IK system
+  ik_debug: false
+
+# VLM-Specific IK Settings
+vlm_ik:
+  # Adaptive timeout management
+  adaptive_timeout: true
+  
+  # Base timeout for IK solving (ms)
+  base_timeout_ms: 50.0
+  
+  # Object-specific grasp orientations
+  grasp_orientations:
+    bottle: "side_grasp"
+    can: "side_grasp" 
+    cylinder: "side_grasp"
+    box: "top_down"
+    book: "top_down"
+    flat: "top_down"
+    unknown: "angled_grasp"
+    default: "angled_grasp"
+
+# Performance Monitoring
+performance:
+  # Enable performance statistics collection
+  enable_stats: true
+  
+  # History size for adaptive timeout calculation
+  history_size: 50
+  
+  # Print performance summary on shutdown
+  print_summary_on_shutdown: true
+
+# Safety and Validation
+safety:
+  # Joint limits validation
+  enforce_joint_limits: true
+  
+  # Maximum joint velocity (rad/s)
+  max_joint_velocity: 1.5708  # π/2 rad/s
+  
+  # Workspace validation
+  validate_workspace: true
+  
+  # Pose validation tolerance (mm)
+  pose_validation_tolerance_mm: 5.0
+
+# Error Handling
+error_handling:
+  # Maximum retries for IK solving
+  max_ik_retries: 3
+  
+  # Fallback to approximation on failure
+  fallback_to_approximation: true
+  
+  # Log failed IK attempts
+  log_ik_failures: true
+  
+  # Graceful degradation strategy
+  degradation_strategy: "approximate"  # Options: "approximate", "abort", "retry"
+
+# Logging Configuration
+logging:
+  # Log level for hybrid IK system
+  ik_log_level: "INFO"  # Options: DEBUG, INFO, WARNING, ERROR
+  
+  # Enable detailed timing logs
+  log_timing: false
+  
+  # Enable solver selection logs
+  log_solver_selection: true
+
+# ROS2 Integration
+ros2:
+  # Command execution timeout (seconds)
+  command_timeout: 5.0
+  
+  # Joint trajectory execution time (seconds)
+  trajectory_time: 1.0
+  
+  # Emergency stop behavior
+  emergency_stop_enabled: true 

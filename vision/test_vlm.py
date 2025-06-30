@@ -17,7 +17,7 @@ try:
     from OWLViTDetector import OWLViTDetector
     from SpeechCommandProcessor import SpeechCommandProcessor
     from CameraCalibration import CameraCalibration
-    from ROS2CommandFormatter import ROS2CommandFormatter  # Our enhanced formatter
+    from UR5eKinematics import UR5eKinematics  # Our kinematics system
 except ImportError as e:
     print(f"Warning: Could not import modules: {e}")
 
@@ -95,7 +95,6 @@ class IntegratedVisionSystem:
         self.state = SystemState()
         self.use_ros2 = use_ros2 and ROS2_AVAILABLE
         
-        # Initialize components
         self.setup_components(use_camera)
         
         # Command processing queue
@@ -133,7 +132,7 @@ class IntegratedVisionSystem:
             self.camera = None
         
         # ROS2 components
-        self.command_formatter = ROS2CommandFormatter()
+        self.kinematics = UR5eKinematics()
         
         if self.use_ros2:
             try:
@@ -151,16 +150,13 @@ class IntegratedVisionSystem:
         """Start the complete system"""
         self.logger.info("🚀 Starting Integrated Vision System")
         
-        # Start speech recognition
         if self.speech:
             self.speech.start_listening()
             self.state.listening = True
         
-        # Start command processing thread
         self.processing_thread = threading.Thread(target=self._processing_loop, daemon=True)
         self.processing_thread.start()
         
-        # Start main loop
         self._main_loop()
 
     def _main_loop(self):
@@ -210,7 +206,6 @@ class IntegratedVisionSystem:
                 command = self.command_queue.get(timeout=1.0)
                 self.state.processing = True
                 
-                # Process the command
                 success = self._process_voice_command(command)
                 
                 if success:
@@ -247,7 +242,6 @@ class IntegratedVisionSystem:
             self.state.error_message = "Object detector not available"
             return False
         
-        # Parse command to get search queries
         queries = self.speech.parse_object_query(command) if self.speech else ['graspable object']
         if not queries:
             queries = ['graspable object']
@@ -295,11 +289,9 @@ class IntegratedVisionSystem:
             print(f"🤖 Executing {len(trajectories)} trajectories...")
             
             if self.use_ros2 and self.ros_node:
-                # Execute on real robot
                 for i, trajectory in enumerate(trajectories):
                     print(f"   Executing trajectory {i+1}/{len(trajectories)}")
                     
-                    # Handle gripper commands
                     for gripper_cmd in gripper_commands:
                         if gripper_cmd['timing'] == i:
                             print(f"   Gripper: {gripper_cmd['action']}")

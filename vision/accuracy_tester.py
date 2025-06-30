@@ -145,7 +145,6 @@ class VisionSystemTester:
                 if not ret:
                     continue
             else:
-                # Create synthetic test image
                 frame = self.create_test_image(scenario['query'])
             
             start_time = time.time()
@@ -210,7 +209,6 @@ class VisionSystemTester:
                 pixel_coords[0], pixel_coords[1], depth
             )
             
-            # Calculate errors
             axis_errors = (
                 abs(actual[0] - detected[0]),
                 abs(actual[1] - detected[1]),
@@ -314,7 +312,6 @@ class VisionSystemTester:
         """
         img = np.ones((480, 640, 3), dtype=np.uint8) * 128
         
-        # Add some basic shapes that might be detected
         if 'bottle' in object_type.lower():
             cv2.rectangle(img, (200, 150), (250, 350), (100, 150, 200), -1)
         elif 'cup' in object_type.lower():
@@ -322,7 +319,6 @@ class VisionSystemTester:
         elif 'phone' in object_type.lower():
             cv2.rectangle(img, (280, 200), (360, 320), (50, 50, 50), -1)
         
-        # Add some noise
         noise = np.random.randint(0, 50, img.shape, dtype=np.uint8)
         img = cv2.add(img, noise)
         
@@ -427,7 +423,6 @@ class VisionSystemTester:
             'recommendations': []
         }
         
-        # Calculate summary statistics
         if self.test_results['detection']:
             detection_scores = [r['accuracy_score'] for r in self.test_results['detection']]
             report['summary']['detection_accuracy'] = {
@@ -460,7 +455,6 @@ class VisionSystemTester:
         # Generate recommendations
         report['recommendations'] = self.generate_recommendations(report['summary'])
         
-        # Calculate overall system score
         scores = []
         if 'detection_accuracy' in report['summary']:
             scores.append(report['summary']['detection_accuracy']['mean'])
@@ -570,11 +564,9 @@ def main():
         format='%(asctime)s - %(levelname)s - %(message)s'
     )
     
-    # Initialize tester
     tester = VisionSystemTester(use_camera=True)
     
     try:
-        # Run comprehensive test
         print("Vision System Accuracy Testing")
         print("=" * 50)
         report = tester.run_comprehensive_test()
@@ -602,7 +594,6 @@ def main():
             for i, rec in enumerate(report['recommendations'], 1):
                 print(f"{i}. {rec}")
         
-        # Save report and create visualizations
         filename = tester.save_report(report)
         tester.create_visualizations(report)
         

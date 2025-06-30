@@ -73,7 +73,6 @@ class OWLViTDetector:
         self.device = torch.device(device)
         
         try:
-            # Load model and processor
             self.processor = OwlViTProcessor.from_pretrained(model_name)
             self.model = OwlViTForObjectDetection.from_pretrained(model_name)
             self.model.to(self.device)
@@ -119,7 +118,6 @@ class OWLViTDetector:
                 return_tensors="pt"
             ).to(self.device)
             
-            # Run inference
             outputs = self.model(**inputs)
             
             # Post-process outputs
@@ -130,7 +128,6 @@ class OWLViTDetector:
                 threshold=self.confidence_threshold
             )[0]
             
-            # Format detections
             detections = []
             for score, label, box in zip(results["scores"], results["labels"], results["boxes"]):
                 score_float = score.item()
@@ -176,7 +173,6 @@ class OWLViTDetector:
         and ensures optimal model performance.
         """
         try:
-            # Convert to PIL Image
             pil_image = Image.fromarray(image)
             
             # Apply processor transformations
@@ -229,7 +225,6 @@ class OWLViTDetector:
         """
         filtered_detections = []
         
-        # Convert to numpy for processing
         boxes_np = boxes.cpu().numpy()
         scores_np = scores.cpu().numpy()
         labels_np = labels.cpu().numpy()
@@ -240,7 +235,6 @@ class OWLViTDetector:
         scores_np = scores_np[mask]
         labels_np = labels_np[mask]
         
-        # Apply NMS if multiple detections
         if len(boxes_np) > 0:
             indices = cv2.dnn.NMSBoxes(
                 boxes_np.tolist(),
@@ -345,3 +339,75 @@ class OWLViTDetector:
         center_x = (x1 + x2) // 2
         center_y = (y1 + y2) // 2
         return (center_x, center_y)
+
+    def detect_with_text_queries(self, image: np.ndarray, queries: List[str], confidence_threshold: float = 0.3) -> List[Tuple[str, float, List[int]]]:
+        """
+        Detect objects in image based on text queries.
+        
+        Parameters
+        ----------
+        image : np.ndarray
+            RGB image as numpy array
+        queries : List[str]
+            List of text queries to detect
+        confidence_threshold : float, optional
+            Detection confidence threshold, by default 0.3
+            
+        Returns
+        -------
+        List[Tuple[str, float, List[int]]]
+            List of detections, each containing:
+            - label: text query that matched
+            - confidence: detection score (0-1)
+            - bbox: bounding box [x1, y1, x2, y2]
+        """
+        if not queries:
+            return []
+        
+        # Temporarily override confidence threshold if provided
+        original_threshold = self.confidence_threshold
+        if confidence_threshold != self.confidence_threshold:
+            self.confidence_threshold = confidence_threshold
+        
+        try:
+            if isinstance(image, np.ndarray):
+                pil_image = Image.fromarray(image.astype('uint8'))
+            else:
+                pil_image = image
+            
+            inputs = self.processor(
+                text=queries,
+                images=pil_image,
+                return_tensors="pt"
+            ).to(self.device)
+            
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+            
+            # Post-process outputs
+            target_sizes = torch.Tensor([image.shape[:2]]).to(self.device)
+            results = self.processor.post_process_object_detection(
+                outputs=outputs,
+                target_sizes=target_sizes,
+                threshold=self.confidence_threshold
+            )[0]
+            
+            detections = []
+            for score, label_id, box in zip(results["scores"], results["labels"], results["boxes"]):
+                confidence = score.item()
+                query = queries[label_id.item()]
+                bbox = [int(i) for i in box.tolist()]
+                detections.append((query, confidence, bbox))
+            
+            # Sort by confidence
+            detections.sort(key=lambda x: x[1], reverse=True)
+            
+            return detections
+            
+        except Exception as e:
+            self.logger.error(f"Error in detect_with_text_queries: {e}")
+            return []
+        finally:
+            # Restore original threshold
+            if confidence_threshold != original_threshold:
+                self.confidence_threshold = original_threshold

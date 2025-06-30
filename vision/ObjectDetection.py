@@ -13,7 +13,6 @@ class ObjectDetection:
         self.logger = logging.getLogger(__name__)
         
         try:
-            # Load YOLOv5 model with optimized settings for better bounding boxes
             self.model = torch.hub.load('ultralytics/yolov5', model_name, pretrained=True)
             
             # Critical settings for better bounding box accuracy
@@ -67,17 +66,14 @@ class ObjectDetection:
         # Get original dimensions
         h, w = frame.shape[:2]
         
-        # Calculate scale to fit into model input size while maintaining aspect ratio
         scale = min(self.input_size / w, self.input_size / h)
         new_w, new_h = int(w * scale), int(h * scale)
         
         # Resize frame
         resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
         
-        # Create padded image
         padded = np.full((self.input_size, self.input_size, 3), self.padding_color, dtype=np.uint8)
         
-        # Calculate padding offsets to center the image
         pad_x = (self.input_size - new_w) // 2
         pad_y = (self.input_size - new_h) // 2
         
@@ -99,7 +95,6 @@ class ObjectDetection:
         """Convert model coordinates back to original frame coordinates"""
         x1, y1, x2, y2 = bbox
         
-        # Remove padding
         x1 -= self.transform_info['pad_x']
         y1 -= self.transform_info['pad_y']
         x2 -= self.transform_info['pad_x']
@@ -130,7 +125,6 @@ class ObjectDetection:
             # Preprocess frame for better detection
             processed_frame = self.preprocess_frame(frame)
             
-            # Run inference with optimized settings
             with torch.no_grad():
                 results = self.model(processed_frame, size=self.input_size)
             
@@ -158,7 +152,6 @@ class ObjectDetection:
                     # Convert coordinates back to original frame
                     bbox = self.postprocess_coordinates([x1, y1, x2, y2])
                     
-                    # Validate bounding box
                     if self.is_valid_bbox(bbox):
                         detections.append((label, float(conf), bbox))
         
@@ -195,7 +188,6 @@ class ObjectDetection:
         """Refine bounding box using edge detection (optional enhancement)"""
         x1, y1, x2, y2 = bbox
         
-        # Extract ROI with margin
         roi_x1 = max(0, x1 - margin)
         roi_y1 = max(0, y1 - margin)
         roi_x2 = min(frame.shape[1], x2 + margin)
@@ -206,7 +198,6 @@ class ObjectDetection:
         if roi.size == 0:
             return bbox
         
-        # Convert to grayscale and apply edge detection
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if len(roi.shape) == 3 else roi
         edges = cv2.Canny(gray, 50, 150)
         
@@ -214,7 +205,6 @@ class ObjectDetection:
         contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         if contours:
-            # Get the largest contour
             largest_contour = max(contours, key=cv2.contourArea)
             
             # Get bounding rectangle

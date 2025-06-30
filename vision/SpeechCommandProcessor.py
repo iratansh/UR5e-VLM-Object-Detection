@@ -21,6 +21,7 @@ import numpy as np
 import re
 import spacy
 from transformers import pipeline
+import sys
 
 logging.basicConfig(level=logging.INFO)
 
@@ -90,9 +91,32 @@ class SpeechCommandProcessor:
         # Calibrate microphone
         self._calibrate_noise()
         
-        # Initialize NLP components
-        self.nlp = spacy.load("en_core_web_sm")
-        self.intent_classifier = pipeline("text-classification", model=model_name, use_gpu=use_gpu)
+        try:
+            # Try to load the spaCy model
+            try:
+                self.nlp = spacy.load("en_core_web_sm")
+                self.logger.info("Loaded spaCy model: en_core_web_sm")
+            except OSError:
+                # If model not found, try to download it
+                self.logger.warning("spaCy model not found. Attempting to download...")
+                import subprocess
+                subprocess.check_call([sys.executable, "-m", "spacy", "download", "en_core_web_sm"])
+                self.nlp = spacy.load("en_core_web_sm")
+                self.logger.info("Downloaded and loaded spaCy model: en_core_web_sm")
+            
+            try:
+                self.intent_classifier = pipeline("text-classification", model=model_name, use_gpu=use_gpu)
+                self.logger.info(f"Loaded intent classifier: {model_name}")
+            except Exception as e:
+                self.logger.warning(f"Could not load intent classifier: {e}")
+                self.intent_classifier = None
+            
+        except Exception as e:
+            self.logger.error(f"Error initializing NLP components: {e}")
+            # Fallback to minimal functionality
+            self.nlp = None
+            self.intent_classifier = None
+        
         self.command_history = []
         
     def _calibrate_noise(self):
@@ -235,8 +259,39 @@ class SpeechCommandProcessor:
         3. Extract target and parameters
         4. Validate command safety
         """
-        # Implementation of process_command method
-        pass
+        if not command:
+            return None
+        
+        doc = self.nlp(command.lower())
+        
+        command_info = {
+            'intent': None,
+            'target': None,
+            'parameters': {}
+        }
+        
+        for intent, pattern in self.command_patterns.items():
+            match = re.search(pattern, command.lower())
+            if match:
+                command_info['intent'] = intent
+                command_info['target'] = match.group(1).strip()
+                break
+        
+        # If no pattern matched, try more complex NLP extraction
+        if not command_info['intent']:
+            verbs = [token.lemma_ for token in doc if token.pos_ == "VERB"]
+            if verbs:
+                command_info['intent'] = verbs[0]
+            
+            nouns = [chunk.text for chunk in doc.noun_chunks]
+            if nouns:
+                command_info['target'] = nouns[-1]  # Last noun chunk is often the target
+        
+        if command_info['intent'] and command_info['target']:
+            self.command_history.append(command_info)
+            return command_info
+        
+        return None
 
     def extract_object_reference(self, command: str) -> Optional[Dict]:
         """
@@ -251,28 +306,60 @@ class SpeechCommandProcessor:
         -------
         Optional[Dict]
             Dictionary containing:
-            - object: Target object name
-            - attributes: Object attributes (color, size, etc.)
+            - object: Main object name
+            - attributes: List of object attributes (color, size, etc.)
+            - spatial: Spatial reference (e.g., "on the left")
             Or None if no object reference found
-            
-        Notes
-        -----
-        Uses SpaCy's dependency parsing to identify:
-        - Direct object references
-        - Descriptive attributes
-        - Spatial relationships
         """
-        # Implementation of extract_object_reference method
-        pass
+        if not command:
+            return None
+        
+        doc = self.nlp(command.lower())
+        
+        result = {
+            'object': None,
+            'attributes': [],
+            'spatial': None
+        }
+        
+        # Find noun chunks that might refer to objects
+        for chunk in doc.noun_chunks:
+            # Skip pronouns and determiners
+            if chunk.root.pos_ == 'NOUN' or chunk.root.pos_ == 'PROPN':
+                # Found a potential object reference
+                result['object'] = chunk.root.text
+                
+                for token in chunk:
+                    if token.pos_ == 'ADJ':
+                        result['attributes'].append(token.text)
+        
+        # Look for spatial references
+        spatial_patterns = [
+            r'on the (left|right|top|bottom)',
+            r'(left|right|top|bottom) side',
+            r'in the (center|middle|front|back)',
+            r'(near|next to|beside) the'
+        ]
+        
+        for pattern in spatial_patterns:
+            match = re.search(pattern, command.lower())
+            if match:
+                result['spatial'] = match.group(0)
+                break
+        
+        if result['object']:
+            return result
+        
+        return None
 
     def validate_command(self, command_info: Dict) -> bool:
         """
-        Validate command safety and feasibility.
+        Validate command for safety and executability.
         
         Parameters
         ----------
         command_info : Dict
-            Processed command information
+            Parsed command information
             
         Returns
         -------
@@ -282,13 +369,30 @@ class SpeechCommandProcessor:
         Notes
         -----
         Checks:
-        - Command syntax and completeness
-        - Known intents and objects
-        - Safety constraints
-        - System capabilities
+        - Command intent is supported
+        - Target object is specified
+        - No unsafe operations requested
         """
-        # Implementation of validate_command method
-        pass
+        if not command_info:
+            return False
+        
+        supported_intents = list(self.command_patterns.keys()) + ['move', 'stop', 'release']
+        if command_info['intent'] not in supported_intents:
+            self.logger.warning(f"Unsupported intent: {command_info['intent']}")
+            return False
+        
+        # Check if target is specified for actions that need it
+        if command_info['intent'] in ['pickup', 'grasp', 'get'] and not command_info['target']:
+            self.logger.warning(f"No target specified for {command_info['intent']} action")
+            return False
+        
+        # Check for unsafe commands (could be expanded)
+        unsafe_targets = ['human', 'person', 'face', 'hand', 'arm']
+        if command_info.get('target') and any(word in command_info['target'].lower() for word in unsafe_targets):
+            self.logger.warning(f"Unsafe target detected: {command_info['target']}")
+            return False
+        
+        return True
 
     def get_command_history(self) -> List[Dict]:
         """
@@ -297,15 +401,24 @@ class SpeechCommandProcessor:
         Returns
         -------
         List[Dict]
-            List of processed commands with results
-            
-        Notes
-        -----
-        Each entry contains:
-        - Original command
-        - Processed intent and parameters
-        - Execution status
-        - Timestamp
+            List of processed command information dictionaries
         """
-        # Implementation of get_command_history method
-        pass
+        return self.command_history
+
+    def cleanup(self):
+        """
+        Clean up resources used by the speech processor.
+        
+        This method ensures proper cleanup of all resources,
+        including stopping the listening thread.
+        """
+        self.stop_listening()
+        
+        # Release microphone resources if needed
+        if hasattr(self, 'microphone') and hasattr(self.microphone, 'close'):
+            try:
+                self.microphone.close()
+            except Exception as e:
+                logging.error(f"Error closing microphone: {e}")
+        
+        logging.info("Speech command processor cleaned up")

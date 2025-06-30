@@ -53,6 +53,10 @@ class WorkspaceValidator:
     ----------
     config : Optional[WorkspaceConfig]
         Workspace configuration, by default None uses default config
+    params : Dict, optional
+        A dictionary of parameters, including:
+        - min_object_volume
+        - max_object_volume
     debug_mode : bool, optional
         Whether to enable debug visualization, by default False
         
@@ -75,11 +79,17 @@ class WorkspaceValidator:
     - Path interpolation and checking
     """
     
-    def __init__(self, config: Optional[WorkspaceConfig] = None, debug_mode: bool = False):
+    def __init__(self, config: Optional[WorkspaceConfig] = None, params: Optional[Dict] = None, debug_mode: bool = False):
         self.logger = logging.getLogger(__name__)
         
         # Default workspace limits for UR5e (in meters)
         self.workspace_limits = config or WorkspaceConfig()
+        
+        # Unpack parameters or use defaults
+        if params is None:
+            params = {}
+        self.min_object_volume = params.get('min_object_volume', 1.0e-6)
+        self.max_object_volume = params.get('max_object_volume', 0.01)
         
         self.logger.info("Workspace validator initialized with limits: "
                         f"x={self.workspace_limits.x_limits}, "
@@ -87,6 +97,29 @@ class WorkspaceValidator:
                         f"z={self.workspace_limits.z_limits}")
 
     def is_reachable(self, x: float, y: float, z: float, safe_mode: bool = True) -> bool:
+        """
+        Check if point is reachable by robot. (Alternative method with separate coordinates)
+        
+        Parameters
+        ----------
+        x : float
+            X coordinate in meters
+        y : float
+            Y coordinate in meters
+        z : float
+            Z coordinate in meters
+        safe_mode : bool, optional
+            Whether to use safety margin, by default True
+            
+        Returns
+        -------
+        bool
+            True if point is reachable, False otherwise
+        
+        Notes
+        -----
+        This is an alternate interface to is_position_reachable that takes separate coordinates.
+        """
         """
         Check if point is reachable by robot.
         
@@ -305,7 +338,7 @@ class WorkspaceValidator:
             self.logger.error(f"Error validating path: {e}")
             return False
 
-    def is_position_reachable(self, position: np.ndarray) -> bool:
+    def is_position_reachable(self, position: np.ndarray, safe_mode: bool = True) -> bool:
         """
         Check if position is within robot's reachable workspace.
         
@@ -313,6 +346,8 @@ class WorkspaceValidator:
         ----------
         position : np.ndarray
             3D position to check [x, y, z]
+        safe_mode : bool, optional
+            Whether to use safety margin, by default True
             
         Returns
         -------
@@ -320,36 +355,15 @@ class WorkspaceValidator:
             True if position is reachable, False otherwise
         """
         try:
-            # Convert position to numpy array if not already
             pos = np.asarray(position)
             
-            # Calculate distance from base
-            distance = np.linalg.norm(pos[:2])  # XY distance from base
-            height = pos[2]  # Z height
-            
-            # UR5e workspace limits
-            MIN_REACH = 0.15  # Minimum reach from base
-            MAX_REACH = 0.85  # Maximum reach from base
-            MIN_HEIGHT = 0.05  # Minimum height from base
-            MAX_HEIGHT = 1.0  # Maximum height from base
-            
-            # Check distance from base
-            if distance < MIN_REACH or distance > MAX_REACH:
-                self.logger.debug(
-                    f"Position distance {distance:.3f}m outside reach limits "
-                    f"[{MIN_REACH}m, {MAX_REACH}m]"
-                )
-                return False
-            
-            # Check height
-            if height < MIN_HEIGHT or height > MAX_HEIGHT:
-                self.logger.debug(
-                    f"Position height {height:.3f}m outside height limits "
-                    f"[{MIN_HEIGHT}m, {MAX_HEIGHT}m]"
-                )
-                return False
-            
-            return True
+            # For compatibility with both versions, delegate to is_reachable if position is a 3-element array
+            if len(pos) == 3:
+                return self.is_reachable(pos[0], pos[1], pos[2], safe_mode=safe_mode)
+                
+            # If we get here, the position format is not recognized
+            self.logger.error(f"Unrecognized position format: {position}")
+            return False
             
         except Exception as e:
             self.logger.error(f"Error checking position reachability: {e}")
@@ -467,7 +481,6 @@ class WorkspaceValidator:
             self.logger.error(f"Invalid safety zone type: {zone['type']}")
             return
             
-        # Add zone to list
         self.safety_zones.append(zone)
         self.logger.info(f"Added {zone['type']} safety zone at {zone['center']}")
 

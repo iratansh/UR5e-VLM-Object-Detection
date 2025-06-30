@@ -18,6 +18,7 @@ import pyrealsense2 as rs
 import logging
 from typing import List, Tuple, Dict, Optional
 from dataclasses import dataclass
+import threading
 
 # Import CameraCalibration if not already (it should be in the same directory)
 from CameraCalibration import CameraCalibration
@@ -62,7 +63,7 @@ class Detection3D:
     approach_vector: Tuple[float, float, float]  # Gripper approach direction
 
 
-class DepthAwareDetection:
+class DepthAwareDetector:
     """
     Depth-aware object detection system.
     
@@ -73,10 +74,11 @@ class DepthAwareDetection:
     ----------
     calibration : CameraCalibration
         Camera calibration object containing necessary parameters
-    use_filters : bool, optional
-        Whether to apply depth filtering, by default True
-    debug_mode : bool, optional
-        Whether to show debug visualizations, by default False
+    params : Dict, optional
+        A dictionary of parameters, including:
+        - use_filters: bool
+        - min_valid_pixels: int
+        - max_depth_variance: float
         
     Attributes
     ----------
@@ -92,12 +94,18 @@ class DepthAwareDetection:
 
     def __init__(self, 
                  calibration: CameraCalibration, 
-                 use_filters: bool = True, 
-                 debug_mode: bool = False):
+                 params: Optional[Dict] = None):
         """Initialize depth-aware detection with RealSense D435i optimized settings."""
         self.logger = logging.getLogger(__name__)
-        self.use_filters = use_filters
-        self.debug_mode = debug_mode
+        
+        # Unpack parameters or use defaults
+        if params is None:
+            params = {}
+        self.use_filters = params.get('use_filters', True)
+        self.min_valid_pixels = params.get('min_valid_pixels', 100)
+        self.depth_variance_threshold = params.get('max_depth_variance', 0.015)
+
+        self.debug_mode = False # Or make this a parameter
         self.calibration = calibration
 
         # Get parameters from the CameraCalibration object
@@ -118,7 +126,6 @@ class DepthAwareDetection:
         self.max_depth = 2.0  # Maximum reliable depth for D435i in meters
         self.min_depth = 0.2  # Minimum reliable depth for D435i in meters
         
-        # Initialize RealSense filters with D435i-optimized settings
         if self.use_filters and self.calibration.source_type == "realsense":
             # Spatial filter - reduces noise while preserving edges
             self.spatial_filter = rs.spatial_filter()
@@ -148,9 +155,7 @@ class DepthAwareDetection:
             self.hole_filling_filter = None
             self.decimation_filter = None
 
-        # Depth reliability thresholds for D435i
-        self.min_valid_pixels = 100  # Minimum pixels for reliable depth
-        self.depth_variance_threshold = 0.015  # Max depth variance (1.5cm)
+        # Depth reliability thresholds for D435i (now from params)
         self.edge_threshold = 0.01  # 1cm threshold for edge detection
 
         self.logger.info(
@@ -239,7 +244,6 @@ class DepthAwareDetection:
 
         disparity = self.stereo_matcher.compute(gray_left, gray_right)
 
-        # Convert disparity to depth (simplified)
         depth_image = disparity.astype(np.float32)
 
         return left_frame, depth_image
@@ -274,7 +278,6 @@ class DepthAwareDetection:
             # Get grasp point using your existing grasp detector
             grasp_info = grasp_detector.find_grasp_points(color_frame, bbox_2d)
 
-            # Calculate 3D information
             detection_3d = self._calculate_3d_properties(
                 label, confidence, bbox_2d, depth_frame, grasp_info
             )
@@ -291,9 +294,11 @@ class DepthAwareDetection:
         raw_depth_image_np: np.ndarray,
         vlm_detections: List[Tuple[str, float, List[int]]],
         grasp_detector: GraspPointDetector,
+        current_gripper_pose: Optional[np.ndarray] = None  # NEW PARAMETER
     ) -> List[Detection3D]:
         """
         Augment 2D detections with depth information and 3D properties.
+        Now handles eye-in-hand configuration with dynamic camera pose.
         
         Parameters
         ----------
@@ -307,6 +312,8 @@ class DepthAwareDetection:
             List of 2D detections (label, confidence, bbox)
         grasp_detector : GraspPointDetector
             Grasp point detection instance
+        current_gripper_pose : Optional[np.ndarray]
+            Current gripper pose for eye-in-hand configuration
             
         Returns
         -------
@@ -316,43 +323,24 @@ class DepthAwareDetection:
         if len(vlm_detections) == 0:
             return []
 
-        # Apply RealSense depth filters if available
         filtered_depth = self._apply_depth_filters(depth_frame_rs) if depth_frame_rs else raw_depth_image_np
 
-        detections_3d = []
-        for label, confidence, bbox_2d in vlm_detections:
-            # Get grasp information first
-            grasp_info = grasp_detector.detect_grasp_point(
-                color_image_np[bbox_2d[1]:bbox_2d[3], bbox_2d[0]:bbox_2d[2]]
-            )
+        def _apply_depth_filters(self, depth_frame: rs.frame) -> np.ndarray:
+            """Apply optimized D435i depth filters in sequence."""
+            if not self.use_filters or not all([
+                self.decimation_filter,
+                self.spatial_filter,
+                self.temporal_filter,
+                self.hole_filling_filter
+            ]):
+                return np.asanyarray(depth_frame.get_data())
+
+            filtered = self.decimation_filter.process(depth_frame)
+            filtered = self.spatial_filter.process(filtered)
+            filtered = self.temporal_filter.process(filtered)
+            filtered = self.hole_filling_filter.process(filtered)
             
-            # Calculate 3D properties using filtered depth
-            detection_3d = self._calculate_3d_properties(
-                label, confidence, bbox_2d, filtered_depth, grasp_info
-            )
-            
-            if detection_3d:
-                detections_3d.append(detection_3d)
-
-        return detections_3d
-
-    def _apply_depth_filters(self, depth_frame: rs.frame) -> np.ndarray:
-        """Apply optimized D435i depth filters in sequence."""
-        if not self.use_filters or not all([
-            self.decimation_filter,
-            self.spatial_filter,
-            self.temporal_filter,
-            self.hole_filling_filter
-        ]):
-            return np.asanyarray(depth_frame.get_data())
-
-        # Apply filters in optimal order for D435i
-        filtered = self.decimation_filter.process(depth_frame)
-        filtered = self.spatial_filter.process(filtered)
-        filtered = self.temporal_filter.process(filtered)
-        filtered = self.hole_filling_filter.process(filtered)
-        
-        return np.asanyarray(filtered.get_data())
+            return np.asanyarray(filtered.get_data())
 
     def _calculate_3d_properties(
         self,
@@ -361,23 +349,21 @@ class DepthAwareDetection:
         bbox_2d: List[int],
         depth_frame: np.ndarray,
         grasp_info: Dict,
+        current_gripper_pose: Optional[np.ndarray] = None  # NEW PARAMETER
     ) -> Optional[Detection3D]:
-        """Calculate 3D properties from depth data with improved error handling."""
+        """Calculate 3D properties from depth data with eye-in-hand support."""
         try:
-            # Extract bbox coordinates
             x1, y1, x2, y2 = bbox_2d
             
             # Get depth ROI
             depth_roi = depth_frame[y1:y2, x1:x2] * self.depth_scale
             
-            # Create valid depth mask
             valid_mask = (depth_roi > self.min_depth) & (depth_roi < self.max_depth)
             
             if np.sum(valid_mask) < self.min_valid_pixels:
                 self.logger.warning(f"Insufficient valid depth pixels for {label}")
                 return None
 
-            # Calculate center point depth using median of valid pixels
             valid_depths = depth_roi[valid_mask]
             center_depth = np.median(valid_depths)
             
@@ -385,15 +371,13 @@ class DepthAwareDetection:
             center_x = (x1 + x2) // 2
             center_y = (y1 + y2) // 2
             
-            # Convert to 3D coordinates
+            # Convert to 3D coordinates in camera frame
             center_3d = self._pixel_to_3d(center_x, center_y, center_depth)
             if not center_3d:
                 return None
 
-            # Calculate 3D bounding box
             bbox_3d = self._estimate_3d_bbox(bbox_2d, depth_roi, valid_mask)
             
-            # Calculate grasp point 3D position
             grasp_pixel_x = x1 + int(grasp_info['x'] * (x2 - x1))
             grasp_pixel_y = y1 + int(grasp_info['y'] * (y2 - y1))
             grasp_depth = self._get_safe_depth_at_point(
@@ -410,12 +394,11 @@ class DepthAwareDetection:
             if not grasp_point_3d:
                 return None
 
-            # Calculate approach vector
-            approach_vector = self._calculate_approach_vector(
-                grasp_info, grasp_point_3d
+            # Calculate approach vector - adjusted for eye-in-hand
+            approach_vector = self._calculate_approach_vector_eye_in_hand(
+                grasp_info, grasp_point_3d, current_gripper_pose
             )
 
-            # Calculate depth confidence
             depth_confidence = self._calculate_depth_confidence(
                 depth_roi, valid_mask
             )
@@ -462,11 +445,11 @@ class DepthAwareDetection:
         For RealSense, uses rs. intrinsics and rs2_deproject_pixel_to_point.
         For other sources, uses self.calibration.pixel_to_camera.
         """
-        if self.calibration.source_type == "realsense" and self.color_intrinsics_rs is not None:
+        if self.calibration.source_type == "realsense" and self.color_intrinsics is not None:
             try:
                 # Ensure pixel_x, pixel_y are int for this function's list conversion
                 # rs2_deproject_pixel_to_point expects depth in meters.
-                point_3d_tuple = rs.rs2_deproject_pixel_to_point(self.color_intrinsics_rs, [int(pixel_x), int(pixel_y)], depth)
+                point_3d_tuple = rs.rs2_deproject_pixel_to_point(self.color_intrinsics, [int(pixel_x), int(pixel_y)], depth)
                 return point_3d_tuple # (x, y, z) tuple
             except Exception as e:
                 self.logger.error(f"Error using rs2_deproject_pixel_to_point: {e}")
@@ -498,12 +481,11 @@ class DepthAwareDetection:
         width_pixels = x2 - x1
         height_pixels = y2 - y1
 
-        # Convert pixel dimensions to world dimensions at average depth
-        if self.calibration.source_type == "realsense" and self.color_intrinsics_rs is not None:
-            fx = self.color_intrinsics_rs.fx
-            fy = self.color_intrinsics_rs.fy
+        if self.calibration.source_type == "realsense" and self.color_intrinsics is not None:
+            fx = self.color_intrinsics.fx
+            fy = self.color_intrinsics.fy
 
-            avg_depth_meters = avg_depth * self.depth_scale_rs # Assuming avg_depth is raw
+            avg_depth_meters = avg_depth * self.depth_scale
             width_meters = width_pixels * avg_depth_meters / fx
             height_meters = height_pixels * avg_depth_meters / fy
         else:
@@ -511,19 +493,19 @@ class DepthAwareDetection:
             if self.calibration.camera_matrix_color is not None:
                 fx = self.calibration.camera_matrix_color[0,0]
                 fy = self.calibration.camera_matrix_color[1,1]
-                avg_depth_meters = avg_depth * (self.depth_scale_rs if self.depth_scale_rs is not None else 0.001) # Best guess for scale
+                avg_depth_meters = avg_depth * (self.depth_scale if self.depth_scale is not None else 0.001) # Best guess for scale
                 width_meters = width_pixels * avg_depth_meters / fx
                 height_meters = height_pixels * avg_depth_meters / fy
             else:
                 # Rough approximation for other cameras if no intrinsics at all
                 self.logger.warning("Estimating 3D bbox without camera intrinsics. Results will be very approximate.")
-                avg_depth_meters = avg_depth * (self.depth_scale_rs if self.depth_scale_rs is not None else 0.001)
+                avg_depth_meters = avg_depth * (self.depth_scale if self.depth_scale is not None else 0.001)
                 width_meters = width_pixels * avg_depth_meters * 0.001 # Very rough guess
                 height_meters = height_pixels * avg_depth_meters * 0.001
 
         # Assuming min_depth and max_depth from depth_roi are also raw depth values
-        min_depth_meters = min_depth * self.depth_scale_rs if self.depth_scale_rs else min_depth * 0.001
-        max_depth_meters = max_depth * self.depth_scale_rs if self.depth_scale_rs else max_depth * 0.001
+        min_depth_meters = min_depth * self.depth_scale if self.depth_scale else min_depth * 0.001
+        max_depth_meters = max_depth * self.depth_scale if self.depth_scale else max_depth * 0.001
         depth_dim_meters = abs(max_depth_meters - min_depth_meters)
 
         return {
@@ -545,21 +527,20 @@ class DepthAwareDetection:
         x = max(window_size // 2, min(w - window_size // 2 - 1, x))
         y = max(window_size // 2, min(h - window_size // 2 - 1, y))
 
-        # Extract local window
         x1 = x - window_size // 2
         x2 = x + window_size // 2 + 1
         y1 = y - window_size // 2
         y2 = y + window_size // 2 + 1
 
         # depth_frame here is expected to be raw (e.g. uint16 for Z16)
-        # so we scale it with self.depth_scale_rs (which should be ~0.001 for mm to m)
-        if self.depth_scale_rs is None:
-            self.logger.error("Depth scale (depth_scale_rs) is not available in _get_safe_depth_at_point. Cannot reliably process depth.")
+        # so we scale it with self.depth_scale (which should be ~0.001 for mm to m)
+        if self.depth_scale is None:
+            self.logger.error("Depth scale (depth_scale) is not available in _get_safe_depth_at_point. Cannot reliably process depth.")
             # Attempt to access depth_frame directly, hoping it's already scaled or _get_safe_depth_at_point is called with scaled data
-            # This is a fallback, proper depth_scale_rs is crucial.
+            # This is a fallback, proper depth_scale is crucial.
             local_depths_meters = depth_frame[y1:y2, x1:x2] 
         else:
-            local_depths_meters = depth_frame[y1:y2, x1:x2] * self.depth_scale_rs
+            local_depths_meters = depth_frame[y1:y2, x1:x2] * self.depth_scale
 
         # Filter valid depths (now in meters)
         valid_depths_meters = local_depths_meters[
@@ -570,81 +551,134 @@ class DepthAwareDetection:
             return np.median(valid_depths_meters)  # Use median for robustness (returns meters)
         else:
             # Fallback to single pixel, scaled to meters
-            if self.depth_scale_rs is None:
+            if self.depth_scale is None:
                 self.logger.warning("Depth scale missing, returning raw center pixel value from depth_frame in _get_safe_depth_at_point fallback.")
                 return depth_frame[y,x] # This would be raw, potentially problematic
-            return depth_frame[y, x] * self.depth_scale_rs # (returns meters)
+            return depth_frame[y, x] * self.depth_scale # (returns meters)
 
-    def _calculate_approach_vector(
-        self, grasp_info: Dict, grasp_point_3d: Tuple[float, float, float]
+    def _calculate_approach_vector_eye_in_hand(
+        self, 
+        grasp_info: Dict, 
+        grasp_point_3d: Tuple[float, float, float],
+        current_gripper_pose: Optional[np.ndarray] = None
     ) -> Tuple[float, float, float]:
-        """Calculate gripper approach vector based on grasp information"""
+        """
+        Calculate gripper approach vector for eye-in-hand configuration.
+        
+        Parameters
+        ----------
+        grasp_info : Dict
+            Grasp information including approach_angle
+        grasp_point_3d : Tuple[float, float, float]
+            3D grasp point coordinates in camera frame
+        current_gripper_pose : Optional[np.ndarray]
+            Current gripper pose (not used here but available for future enhancements)
+            
+        Returns
+        -------
+        Tuple[float, float, float]
+            Normalized approach vector in camera frame
+            
+        Notes
+        -----
+        For eye-in-hand configuration where camera looks down at workspace:
+        - Default approach is straight down (negative Z in camera frame)
+        - Approach angle controls the horizontal tilt
+        - Vector is in camera frame and will be transformed to robot frame by caller
+        """
         if not grasp_info or "approach_angle" not in grasp_info:
-            return (0.0, 0.0, -1.0)  # Default top-down approach
+            # Default straight down approach for eye-in-hand
+            return (0.0, 0.0, -1.0)
 
         angle = grasp_info["approach_angle"]
 
-        # Convert 2D approach angle to 3D approach vector
-        # Assuming approach is primarily in X-Y plane with slight downward angle
-        approach_x = np.cos(angle) * 0.7  # 70% horizontal
-        approach_y = np.sin(angle) * 0.7
-        approach_z = -0.3  # 30% downward
+        # For eye-in-hand camera looking down at workspace:
+        # - Camera Z-axis points away from camera (down towards workspace)
+        # - Camera X and Y define the horizontal plane
+        # - We want mostly vertical approach with optional slight tilt
+        
+        tilt_angle = 0.2  # Maximum tilt from vertical (radians, ~11 degrees)
+        
+        # Horizontal components based on grasp angle
+        approach_x = np.sin(tilt_angle) * np.cos(angle)
+        approach_y = np.sin(tilt_angle) * np.sin(angle)
+        approach_z = -np.cos(tilt_angle)  # Negative Z is towards workspace
 
         # Normalize vector
         magnitude = np.sqrt(approach_x**2 + approach_y**2 + approach_z**2)
+        if magnitude > 0:
+            return (approach_x / magnitude, approach_y / magnitude, approach_z / magnitude)
+        else:
+            return (0.0, 0.0, -1.0)
 
-        return (approach_x / magnitude, approach_y / magnitude, approach_z / magnitude)
-
-    def get_point_cloud(self, max_distance: float = 1.0) -> Optional[np.ndarray]:
-        """Generate point cloud from current depth frame"""
-        color_frame, depth_frame = self.get_frames()
-
+    def get_point_cloud(self, color_frame: np.ndarray = None, depth_frame: np.ndarray = None, max_distance: float = 1.0) -> Optional[np.ndarray]:
+        """Generate point cloud from provided depth frame or fetch if not provided.
+        
+        Parameters
+        ----------
+        color_frame : np.ndarray, optional
+            Color frame for point cloud mapping
+        depth_frame : np.ndarray, optional
+            Depth frame for point cloud generation
+        max_distance : float, optional
+            Maximum distance for point cloud filtering, by default 1.0
+            
+        Returns
+        -------
+        Optional[np.ndarray]
+            Point cloud as numpy array, or None if generation fails
+        """
         if color_frame is None or depth_frame is None:
+            self.logger.warning("get_point_cloud requires frames to be provided externally.")
             return None
 
         if self.calibration.source_type == "realsense":
             # Use RealSense built-in point cloud generation
             pc = rs.pointcloud()
-            frames = self.pipeline.wait_for_frames()
-            depth = frames.get_depth_frame()
-            color = frames.get_color_frame()
-
-            if depth and color:
-                pc.map_to(color)
-                points = pc.calculate(depth)
-                vertices = (
-                    np.asanyarray(points.get_vertices()).view(np.float32).reshape(-1, 3)
-                )
-
-                # Filter by distance
-                distances = np.linalg.norm(vertices, axis=1)
-                valid_points = vertices[distances < max_distance]
-
-                return valid_points
+            # Since frames are provided as numpy arrays, we need to handle them differently
+            # This part might need adjustment based on how frames are passed
+            self.logger.warning("Point cloud generation from numpy arrays is not fully implemented.")
+            return None
 
         return None
 
-    def validate_grasp_3d(self, detection: Detection3D, workspace_validator) -> bool:
+    def validate_grasp_3d(
+        self, 
+        detection: Detection3D, 
+        workspace_validator: WorkspaceValidator,
+        current_gripper_pose: Optional[np.ndarray] = None
+    ) -> bool:
         """
         Validate if 3D detection is graspable within workspace.
+        Now handles eye-in-hand configuration.
         
         Parameters
         ----------
         detection : Detection3D
             3D detection to validate
-        workspace_validator : Any
+        workspace_validator : WorkspaceValidator
             Workspace validation system
+        current_gripper_pose : Optional[np.ndarray]
+            Current gripper pose for eye-in-hand transformation
             
         Returns
         -------
         bool
             True if detection is valid and graspable
         """
-        x, y, z = detection.grasp_point_3d
+        # For eye-in-hand, we need to transform the grasp point to robot frame
+        if self.calibration.is_eye_in_hand and current_gripper_pose is not None:
+            # Transform grasp point from camera to robot frame
+            grasp_point_robot = self.calibration.camera_to_robot(
+                detection.grasp_point_3d, current_gripper_pose
+            )
+            x, y, z = grasp_point_robot
+        else:
+            x, y, z = detection.grasp_point_3d
 
         # Check workspace constraints
         if not workspace_validator.is_reachable(x, y, z, safe_mode=True):
-            self.logger.warning(f"Grasp point {detection.label} outside safe workspace")
+            self.logger.warning(f"Position {x, y, z} is outside workspace bounds")
             return False
 
         # Check depth confidence
@@ -654,19 +688,29 @@ class DepthAwareDetection:
             )
             return False
 
-        # Check if object is not too small or too large
-        if detection.volume < 0.000001 or detection.volume > 0.01:  # 1mm³ to 10cm³
+        if not (workspace_validator.min_object_volume <= detection.volume <= workspace_validator.max_object_volume):
             self.logger.warning(
                 f"Object {detection.label} size may be problematic: {detection.volume:.6f}m³"
             )
             return False
+
+        # Additional validation for eye-in-hand
+        if self.calibration.is_eye_in_hand:
+            # Check if the approach vector makes sense for eye-in-hand
+            # Should be mostly downward
+            approach_z = detection.approach_vector[2]
+            if approach_z > -0.7:  # cos(45°) ≈ 0.7
+                self.logger.warning(
+                    f"Approach vector not suitable for eye-in-hand: z={approach_z:.2f}"
+                )
+                return False
 
         return True
 
     def visualize_3d_detection(
         self, frame: np.ndarray, detection: Detection3D
     ) -> np.ndarray:
-        """Visualize 3D detection information on frame"""
+        """Visualize 3D detection information on frame with eye-in-hand awareness"""
         x1, y1, x2, y2 = detection.bbox_2d
 
         # Draw 2D bounding box
@@ -678,10 +722,12 @@ class DepthAwareDetection:
             gx, gy = grasp_2d
             cv2.circle(frame, (int(gx), int(gy)), 8, (0, 0, 255), -1)
 
-            # Draw approach vector
+            # Draw approach vector (adjusted for eye-in-hand view)
+            # For eye-in-hand, the approach is typically more vertical
+            approach_scale = 30 if self.calibration.is_eye_in_hand else 50
             approach_end = (
-                gx + detection.approach_vector[0] * 50,
-                gy + detection.approach_vector[1] * 50,
+                gx + detection.approach_vector[0] * approach_scale,
+                gy + detection.approach_vector[1] * approach_scale,
             )
             cv2.arrowedLine(
                 frame,
@@ -691,9 +737,10 @@ class DepthAwareDetection:
                 2,
             )
 
-        # Add 3D information text
+        # Add 3D information text with eye-in-hand indicator
+        config_text = "Eye-in-hand" if self.calibration.is_eye_in_hand else "Eye-to-hand"
         info_text = [
-            f"{detection.label} ({detection.confidence:.2f})",
+            f"{detection.label} ({detection.confidence:.2f}) - {config_text}",
             f"3D: ({detection.grasp_point_3d[0]:.3f}, {detection.grasp_point_3d[1]:.3f}, {detection.grasp_point_3d[2]:.3f})",
             f"Depth Conf: {detection.depth_confidence:.2f}",
             f"Volume: {detection.volume*1000000:.1f}cm³",
@@ -799,21 +846,18 @@ class DepthAwareDetection:
         """
         x1, y1, x2, y2 = bbox_2d
         
-        # Extract depth region
         depth_roi = depth_frame[y1:y2, x1:x2]
         
         # No valid measurements
         if depth_roi.size == 0:
             return 0.0
             
-        # Calculate percentage of valid measurements
         valid_mask = (depth_roi > 0) & (depth_roi * self.depth_scale < self.max_depth)
         valid_percentage = np.sum(valid_mask) / depth_roi.size
         
         if valid_percentage < 0.3:  # Require at least 30% valid measurements
             return 0.0
             
-        # Calculate depth consistency
         valid_depths = depth_roi[valid_mask] * self.depth_scale
         depth_std = np.std(valid_depths)
         consistency_score = np.exp(-depth_std / 0.1)  # Penalize high variance

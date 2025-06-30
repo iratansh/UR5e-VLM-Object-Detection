@@ -222,7 +222,6 @@ class ImprovedDebugTest:
             
             bbox_quality_scores = []
             
-            # Process each detection
             for i, (label, confidence, bbox) in enumerate(detections):
                 original_bbox = bbox.copy()
                 
@@ -231,7 +230,6 @@ class ImprovedDebugTest:
                     refined_bbox = self.detector.refine_bounding_box(frame, bbox)
                     bbox = refined_bbox
                 
-                # Calculate bbox quality score
                 quality_score = self.calculate_bbox_quality(frame, bbox)
                 bbox_quality_scores.append(quality_score)
                 
@@ -250,13 +248,11 @@ class ImprovedDebugTest:
                 if self.enable_bbox_refinement and original_bbox != bbox:
                     self.draw_bbox_comparison(frame, original_bbox, bbox)
                 
-                # Add quality score text
                 x1, y1, x2, y2 = bbox
                 quality_text = f"Q: {quality_score:.2f}"
                 cv2.putText(frame, quality_text, (x1, y2 + 15), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
             
-            # Store average quality score
             if bbox_quality_scores:
                 avg_quality = np.mean(bbox_quality_scores)
                 self.bbox_accuracy_scores.append(avg_quality)
@@ -276,12 +272,10 @@ class ImprovedDebugTest:
         """Calculate bounding box quality score based on multiple factors"""
         x1, y1, x2, y2 = bbox
         
-        # Extract ROI
         roi = frame[y1:y2, x1:x2]
         if roi.size == 0:
             return 0.0
         
-        # Convert to grayscale
         gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if len(roi.shape) == 3 else roi
         
         # Factor 1: Edge density (higher is better for object boundaries)
@@ -331,7 +325,6 @@ class ImprovedDebugTest:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         edges = cv2.Canny(gray, 50, 150)
         
-        # Create colored edge display
         edge_colored = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
         
         cv2.imshow('Edge Detection', edge_colored)
@@ -419,7 +412,6 @@ class ImprovedDebugTest:
         self.detector.confidence_threshold = original_threshold
         self.detector.model.conf = original_model_conf
         
-        # Print results
         print("\n" + "="*60)
         print("BBOX ACCURACY TEST RESULTS")
         print("="*60)

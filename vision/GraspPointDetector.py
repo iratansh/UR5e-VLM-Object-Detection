@@ -39,121 +39,6 @@ class GraspPointDetector:
         
         self.logger.info("✅ Grasp point detector initialized")
 
-    def find_grasp_points(self, frame: np.ndarray, bbox: List[int], 
-                         depth_frame: Optional[np.ndarray] = None) -> Dict:
-        """
-        Find optimal grasp points for an object.
-        
-        Parameters
-        ----------
-        frame : np.ndarray
-            RGB image frame
-        bbox : List[int]
-            Bounding box coordinates [x1, y1, x2, y2]
-        depth_frame : Optional[np.ndarray], optional
-            Depth image frame, by default None
-            
-        Returns
-        -------
-        Dict
-            Grasp information including:
-            - grasp_point: (x, y) pixel coordinates
-            - approach_angle: angle in radians
-            - grasp_width: estimated width in meters
-            - confidence: grasp quality score (0-1)
-        """
-        try:
-            # Extract object region
-            x1, y1, x2, y2 = bbox
-            object_roi = frame[y1:y2, x1:x2]
-            
-            # Convert to grayscale for contour detection
-            gray = cv2.cvtColor(object_roi, cv2.COLOR_BGR2GRAY)
-            
-            # Find contours
-            contours, _ = cv2.findContours(gray, cv2.RETR_EXTERNAL, 
-                                         cv2.CHAIN_APPROX_SIMPLE)
-            
-            if not contours:
-                return None
-                
-            # Find largest contour
-            largest_contour = max(contours, key=cv2.contourArea)
-            
-            # Calculate grasp points
-            grasp_info = self._analyze_contour(largest_contour, depth_frame)
-            if grasp_info:
-                # Adjust coordinates to original frame
-                grasp_info['grasp_point'] = (
-                    grasp_info['grasp_point'][0] + x1,
-                    grasp_info['grasp_point'][1] + y1
-                )
-                
-            return grasp_info
-            
-        except Exception as e:
-            self.logger.error(f"Error finding grasp points: {e}")
-            return None
-
-    def _analyze_contour(self, contour: np.ndarray, 
-                        depth_frame: Optional[np.ndarray]) -> Dict:
-        """
-        Analyze contour to find grasp points.
-        
-        Parameters
-        ----------
-        contour : np.ndarray
-            Object contour points
-        depth_frame : Optional[np.ndarray]
-            Depth image frame
-            
-        Returns
-        -------
-        Dict
-            Grasp point information
-        """
-        # Find minimum area rectangle
-        rect = cv2.minAreaRect(contour)
-        box = cv2.boxPoints(rect)
-        box = np.int0(box)
-        
-        # Get center, width, height, and angle
-        center = rect[0]
-        width = rect[1][0]
-        height = rect[1][1]
-        angle = rect[2]
-        
-        # Ensure width is the shorter dimension
-        if width > height:
-            width, height = height, width
-            angle += 90
-            
-        # Convert angle to radians
-        angle_rad = np.deg2rad(angle)
-        
-        # Calculate grasp width in pixels
-        grasp_width_pixels = width
-        
-        # Convert to meters if depth information available
-        grasp_width_meters = None
-        if depth_frame is not None:
-            # Use depth to convert pixels to meters
-            depth_scale = 0.001  # Assuming depth in millimeters
-            grasp_width_meters = grasp_width_pixels * depth_scale
-            
-            if not (self.min_grasp_width <= grasp_width_meters <= self.max_grasp_width):
-                return None
-        
-        # Calculate grasp quality score
-        quality_score = self._calculate_grasp_quality(contour, angle_rad)
-        
-        return {
-            'grasp_point': tuple(map(int, center)),
-            'approach_angle': angle_rad,
-            'grasp_width': grasp_width_meters or grasp_width_pixels,
-            'confidence': quality_score
-        }
-
     def _calculate_grasp_quality(self, contour: np.ndarray, angle: float) -> float:
         """
         Calculate grasp quality score.
@@ -175,7 +60,6 @@ class GraspPointDetector:
         # 2. Distance from center of mass
         # 3. Contour curvature at grasp points
         
-        # Calculate center of mass
         M = cv2.moments(contour)
         if M['m00'] == 0:
             return 0.0
@@ -183,10 +67,8 @@ class GraspPointDetector:
         cx = int(M['m10']/M['m00'])
         cy = int(M['m01']/M['m00'])
         
-        # Calculate symmetry score
         symmetry_score = self._calculate_symmetry(contour, (cx, cy), angle)
         
-        # Calculate curvature score
         curvature_score = self._calculate_curvature(contour)
         
         # Combine scores (weights can be adjusted)
@@ -223,7 +105,6 @@ class GraspPointDetector:
         # Project onto axis
         projections = np.dot(centered_points, axis_vector)
         
-        # Calculate symmetry by comparing point distributions
         left_points = projections[projections < 0]
         right_points = projections[projections > 0]
         
@@ -267,7 +148,6 @@ class GraspPointDetector:
 
     def _create_object_mask(self, roi: np.ndarray) -> np.ndarray:
         """Create object mask using color segmentation and morphology"""
-        # Convert to different color spaces for better segmentation
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
         
@@ -323,7 +203,6 @@ class GraspPointDetector:
             if self.min_grasp_width <= object_width_meters <= self.max_grasp_width:
                 grasp_x = (left_edge + right_edge) // 2
                 
-                # Calculate grasp quality based on object symmetry and stability
                 quality = self._calculate_width_grasp_quality(mask, grasp_x, y, 
                                                             left_edge, right_edge)
                 
@@ -364,12 +243,10 @@ class GraspPointDetector:
                     end = tuple(largest_contour[e][0])
                     far = tuple(largest_contour[f][0])
                     
-                    # Check if this forms a good grasp point
                     if d > 1000:  # Sufficient depth
                         grasp_point = ((start[0] + end[0]) // 2, 
                                      (start[1] + end[1]) // 2)
                         
-                        # Calculate approach angle
                         angle = np.arctan2(end[1] - start[1], end[0] - start[0])
                         
                         quality = self._calculate_edge_grasp_quality(mask, grasp_point, angle)
@@ -397,7 +274,6 @@ class GraspPointDetector:
             for corner in corners:
                 x, y = corner.ravel().astype(int)
                 
-                # Check if corner is suitable for grasping
                 if self._is_graspable_corner(mask, x, y):
                     quality = self._calculate_corner_grasp_quality(mask, x, y)
                     
@@ -442,7 +318,6 @@ class GraspPointDetector:
         """Calculate quality score for edge-based grasp"""
         x, y = point
         
-        # Check if grasp point is on the object
         if not (0 <= x < mask.shape[1] and 0 <= y < mask.shape[0]):
             return 0.0
             
@@ -488,7 +363,6 @@ class GraspPointDetector:
         
         clearance_region = mask[y1:y2, x1:x2]
         
-        # Calculate percentage of clear space
         clear_pixels = np.sum(clearance_region == 0)
         total_pixels = clearance_region.size
         
@@ -550,7 +424,6 @@ class GraspPointDetector:
     
     def _validate_gripper_constraints(self, grasp: Dict, mask: np.ndarray, depth_frame: Optional[np.ndarray] = None) -> bool:
         """Validate grasp against gripper physical constraints"""
-        # Check if grasp width is within gripper capabilities
         if not (self.min_grasp_width <= grasp['grasp_width'] <= self.max_grasp_width):
             return False
         
@@ -570,21 +443,20 @@ class GraspPointDetector:
                 # Check if point is within frame
                 h, w = depth_frame.shape
                 if 0 <= sample_x < w and 0 <= sample_y < h:
-                    # Check if depth at this point is clear (no obstacles)
                     if depth_frame[sample_y, sample_x] < grasp.get('depth', float('inf')):
                         return False
         
         return True
     
-    def _fallback_center_grasp(self, bbox: List[int]) -> Dict:
+    def _fallback_center_grasp(self, shape) -> Dict:
         """Fallback to center grasp if no other options"""
-        x1, y1, x2, y2 = bbox
-        center_x = (x1 + x2) // 2
-        center_y = (y1 + y2) // 2
+        h, w = shape[:2] if len(shape) > 2 else shape
+        center_x = w // 2
+        center_y = h // 2
         
         return {
             'grasp_point': (center_x, center_y),
-            'grasp_width': min(x2 - x1, y2 - y1) * 0.001,  # Rough estimate
+            'grasp_width': min(w, h) * 0.001,  # Rough estimate
             'approach_angle': -np.pi/2,  # Top-down approach
             'quality': 0.3,  # Low quality fallback
             'type': 'center_fallback'
@@ -625,9 +497,69 @@ class GraspPointDetector:
         jaw2_y2 = int(jaw2_y1 + 15 * np.sin(angle))
         cv2.line(frame, (jaw2_x1, jaw2_y1), (jaw2_x2, jaw2_y2), (0, 0, 255), 3)
         
-        # Add text info
         info_text = f"{grasp_info['type']}: Q={grasp_info['quality']:.2f}"
         cv2.putText(frame, info_text, (int(x-50), int(y-20)), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         return frame
+
+    def detect_grasp_point(self, roi: np.ndarray) -> Dict:
+        """
+        Detect optimal grasp point from ROI.
+        
+        Parameters
+        ----------
+        roi : np.ndarray
+            Region of interest containing object
+            
+        Returns
+        -------
+        Dict
+            Grasp information including:
+            - x, y: Normalized coordinates (0-1) within ROI
+            - approach_angle: Approach angle in radians
+            - width: Estimated grasp width
+            - quality: Grasp quality score
+            
+        Notes
+        -----
+        Approach angles are defined relative to camera frame:
+        - For eye-in-hand (camera looking down): 0 = approach from positive X
+        - Angles increase counter-clockwise when viewed from above
+        """
+        try:
+            mask = self._create_object_mask(roi)
+            
+            # Find different types of grasp candidates
+            width_grasps = self._find_width_based_grasps(mask, roi)
+            edge_grasps = self._find_edge_based_grasps(mask, roi)
+            corner_grasps = self._find_corner_grasps(mask, roi)
+            
+            # Combine all candidates
+            all_grasps = width_grasps + edge_grasps + corner_grasps
+            
+            # Select best grasp
+            best_grasp = self._select_best_grasp(all_grasps, mask)
+            
+            # Convert to normalized coordinates
+            h, w = roi.shape[:2]
+            normalized_grasp = {
+                'x': best_grasp['grasp_point'][0] / w,
+                'y': best_grasp['grasp_point'][1] / h,
+                'approach_angle': best_grasp['approach_angle'],
+                'width': best_grasp['grasp_width'],
+                'quality': best_grasp['quality']
+            }
+            
+            return normalized_grasp
+            
+        except Exception as e:
+            self.logger.error(f"Error detecting grasp point: {e}")
+            # Fallback to center grasp
+            return {
+                'x': 0.5,
+                'y': 0.5,
+                'approach_angle': 0.0,  # Default horizontal approach
+                'width': 0.04,
+                'quality': 0.1
+            }

@@ -66,10 +66,10 @@ class UR5eGraspController(Node):
     - Hand-eye calibration for visual servoing
     """
     
-    # UR5e specifications
+    # UR5e specifications - CORRECTED to match UR5eKinematics for consistency
     JOINT_LIMITS = {
-        'lower': np.array([-2*np.pi, -2*np.pi, -2*np.pi, -2*np.pi, -2*np.pi, -2*np.pi]),
-        'upper': np.array([2*np.pi, 2*np.pi, 2*np.pi, 2*np.pi, 2*np.pi, 2*np.pi])
+        'lower': np.array([-2*np.pi, -np.pi, -np.pi, -2*np.pi, -2*np.pi, -2*np.pi]),
+        'upper': np.array([2*np.pi, np.pi, np.pi, 2*np.pi, 2*np.pi, 2*np.pi])
     }
     
     # Robot dimensions
@@ -83,7 +83,6 @@ class UR5eGraspController(Node):
     def __init__(self):
         super().__init__('ur5e_grasp_controller')
         
-        # Initialize logging
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
         
@@ -218,13 +217,11 @@ class UR5eGraspController(Node):
             # Compute Jacobian
             J = self._compute_jacobian(theta)
             
-            # Handle singularities
             if self._is_singular(J):
                 J = self._damped_pseudoinverse(J)
             else:
                 J = LA.pinv(J)
             
-            # Update joints
             delta_theta = J @ V_b
             theta = theta + delta_theta
             
@@ -333,7 +330,6 @@ class UR5eGraspController(Node):
             # Plan grasp trajectory
             grasp_poses = self.plan_grasp(object_pose)
             
-            # Execute each pose in sequence
             for pose in grasp_poses:
                 # Compute IK
                 target_joints, success = self.inverse_kinematics(pose)
@@ -342,12 +338,10 @@ class UR5eGraspController(Node):
                     self.logger.error("IK failed to converge")
                     return False
                 
-                # Check if solution is valid
                 if not self._validate_solution(target_joints):
                     self.logger.error("Invalid joint solution")
                     return False
                 
-                # Execute motion
                 self._execute_motion(target_joints)
             
             return True
