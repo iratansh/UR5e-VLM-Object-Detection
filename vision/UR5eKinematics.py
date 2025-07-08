@@ -158,11 +158,12 @@ class HybridUR5eKinematics:
             # as specified by the ikfast error message.
             ee_pose = np.concatenate((position, np.array(quat)))
 
-            # Call ur_ikfast with standard Python lists to avoid internal numpy errors
+            # Call ur_ikfast, ensuring all inputs are standard Python lists/floats
+            # to work around the library's internal numpy handling issues.
             joint_configs = ur5e_arm.inverse(
-                ee_pose.tolist(),
+                [float(x) for x in ee_pose],
                 False,           # closest_only: False to get all solutions
-                np.array([0.0] * 6).tolist() # seed for IK solver as a list
+                [0.0] * 6        # seed for IK solver as a plain list
             )
             
             solutions = []
