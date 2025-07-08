@@ -61,3 +61,4 @@ crashlytics-build.properties
 
 # Paper
 paper.tex
+.DS_Store
