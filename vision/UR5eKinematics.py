@@ -154,11 +154,15 @@ class HybridUR5eKinematics:
             # Convert rotation matrix to quaternion (w, x, y, z)
             quat = self._rotation_matrix_to_quaternion(rotation)
             
-            # Call ur_ikfast with numpy arrays
+            # Create the 7-element pose vector [tx, ty, tz, w, x, y, z]
+            # as specified by the ikfast error message.
+            ee_pose = np.concatenate((position, np.array(quat)))
+
+            # Call ur_ikfast with the full 7-element pose.
             joint_configs = ur5e_arm.inverse(
-                position,
+                ee_pose,
                 False,           # closest_only: False to get all solutions
-                np.array([0.0] * 6) # seed for IK solver as numpy array
+                np.array([0.0] * 6) # seed for IK solver
             )
             
             solutions = []
