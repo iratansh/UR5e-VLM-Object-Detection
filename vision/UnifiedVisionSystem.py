@@ -170,6 +170,7 @@ class UnifiedVisionSystem(Node):
             config.enable_stream(rs.stream.depth, depth_width, depth_height, rs.format.z16, depth_fps)
             config.enable_stream(rs.stream.color, color_width, color_height, rs.format.bgr8, color_fps)
             
+            # Start pipeline
             profile = self.pipeline.start(config)
             self.pipeline_started = True
             self.logger.info("RealSense pipeline started successfully")
@@ -305,8 +306,10 @@ class UnifiedVisionSystem(Node):
         self.command_timeout = 5.0  # seconds
         self.last_command_time = None
 
+        # Create command execution timer
         self.command_timer = self.create_timer(0.1, self._process_command_queue)
 
+        # Start subsystems
         self.logger.info("Starting voice control...")
         self._setup_voice_control()
         self.logger.info("✅ UnifiedVisionSystem initialized successfully.")
@@ -325,6 +328,7 @@ class UnifiedVisionSystem(Node):
             If voice control initialization fails
         """
         try:
+            # Start speech recognition in a separate thread to avoid blocking
             self.speech_thread = threading.Thread(target=self.speech_processor.start_listening, daemon=True)
             self.speech_thread.start()
             self.logger.info("🎤 Voice control setup and started in background thread.")
@@ -420,6 +424,7 @@ class UnifiedVisionSystem(Node):
 
         self.logger.info(f"Generated {len(detections_3d)} 3D detections. Validating...")
         
+        # Validate detections with gripper pose
         for det_3d in detections_3d:
             if self.depth_detector.validate_grasp_3d(det_3d, self.workspace_validator, current_gripper_pose):
                 self.logger.info(f"Valid graspable 3D detection found: {det_3d.label} at {det_3d.grasp_point_3d}")
@@ -469,6 +474,7 @@ class UnifiedVisionSystem(Node):
                 # Use hybrid VLM-optimized IK controller
                 self.logger.info("Using Hybrid IK System (ur_ikfast + numerical)")
                 
+                # Extract position and create a suitable orientation
                 target_position = target_pose_matrix[:3, 3].tolist()
                 target_orientation = target_pose_matrix[:3, :3]
                 
@@ -493,6 +499,7 @@ class UnifiedVisionSystem(Node):
                         self.logger.info(f"Using approximation with {metadata['position_error_mm']:.1f}mm error")
                         self.publish_status(f"Approximate solution: {metadata['position_error_mm']:.1f}mm error")
                     
+                    # Log solver usage
                     solvers_used = ", ".join(metadata['solver_used'])
                     self.logger.info(f"Solvers used: {solvers_used}")
                     
@@ -578,6 +585,7 @@ class UnifiedVisionSystem(Node):
         """
         MAX_JOINT_VELOCITY = np.pi / 2  # 90 degrees per second max
         
+        # Calculate joint velocities (assuming 1 second movement)
         # NOTE: This is a simplification. Actual velocity depends on controller execution time.
         # The robot controller (e.g., JointGroupPositionController) usually handles velocity limits.
         # This check can be a pre-emptive safety measure but may not be fully accurate.
@@ -648,6 +656,7 @@ class UnifiedVisionSystem(Node):
             ros2_command_msg = JointTrajectory()
             ros2_command_msg.joint_names = cmd_data["joint_names"]
             
+            # Create point
             point = JointTrajectoryPoint()
             point.positions = cmd_data["points"][0]["positions"]
             point.velocities = cmd_data["points"][0]["velocities"]
@@ -658,6 +667,7 @@ class UnifiedVisionSystem(Node):
             point.time_from_start.sec = time_from_start["sec"]
             point.time_from_start.nanosec = time_from_start["nanosec"]
             
+            # Add point to trajectory
             ros2_command_msg.points = [point]
             
             # Publish the message
@@ -948,6 +958,7 @@ class UnifiedVisionSystem(Node):
             
         self._publish_debug_target_pose(target_pose_matrix_robot)
 
+        # Calculate inverse kinematics
         joint_solution = self._calculate_inverse_kinematics(target_pose_matrix_robot)
         self.last_joint_solution = joint_solution
 
@@ -998,6 +1009,31 @@ class UnifiedVisionSystem(Node):
         
         return True
 
+    def _add_gripper_clearance_to_grasp(self, grasp_point_3d: Tuple[float, float, float]) -> Tuple[float, float, float]:
+        """
+        Add clearance for gripper visibility in eye-in-hand configuration.
+        
+        Parameters
+        ----------
+        grasp_point_3d : Tuple[float, float, float]
+            Original grasp point
+            
+        Returns
+        -------
+        Tuple[float, float, float]
+            Adjusted grasp point with clearance
+        """
+        if not self.eye_in_hand:
+            return grasp_point_3d
+        
+        # Add small offset to ensure gripper doesn't occlude the object completely
+        x, y, z = grasp_point_3d
+        
+        # Lift slightly to maintain visibility
+        z_offset = 0.02  # 2cm higher
+        
+        return (x, y, z + z_offset)
+
     def _validate_robot_pose(self, pose_matrix: np.ndarray) -> bool:
         """
         Validate if the robot pose is safe and reachable.
@@ -1013,6 +1049,7 @@ class UnifiedVisionSystem(Node):
             True if pose is valid and safe, False otherwise
         """
         try:
+            # Extract position
             position = pose_matrix[:3, 3]
             x, y, z = position
             
@@ -1032,6 +1069,31 @@ class UnifiedVisionSystem(Node):
         except Exception as e:
             self.logger.error(f"Error validating robot pose: {e}")
             return False
+    def _validate_camera_trajectory(self, waypoints: List[np.ndarray]) -> bool:
+        """
+        Validate that camera trajectory maintains good visibility for eye-in-hand.
+        
+        Parameters
+        ----------
+        waypoints : List[np.ndarray]
+            List of gripper poses along trajectory
+            
+        Returns
+        -------
+        bool
+            True if trajectory maintains visibility
+        """
+        if not self.eye_in_hand:
+            return True
+        
+        for i, pose in enumerate(waypoints):
+            # Check that camera maintains downward view
+            camera_z = pose[:3, 2]
+            if camera_z[2] > -0.5:  # Camera should look mostly down
+                self.logger.warning(f"Waypoint {i} has poor camera orientation for visibility")
+                return False
+        
+        return True
 
     def run(self):
         """
@@ -1071,6 +1133,7 @@ class UnifiedVisionSystem(Node):
                 # Process ROS callbacks first to ensure we have latest robot state
                 rclpy.spin_once(self, timeout_sec=0.05)
                 
+                # Run one cycle of the vision pipeline
                 self.run_pipeline_once()
                 
                 # Small sleep to avoid CPU overuse
@@ -1104,6 +1167,7 @@ class UnifiedVisionSystem(Node):
         except Exception as e:
             self.logger.error(f"Error printing performance summary: {e}")
         
+        # Stop speech recognition first
         if hasattr(self, 'speech_processor') and hasattr(self.speech_processor, 'stop_listening'):
             self.speech_processor.stop_listening()
         if hasattr(self, 'speech_thread') and self.speech_thread and self.speech_thread.is_alive():
@@ -1228,9 +1292,11 @@ def main(args=None):
     signal.signal(signal.SIGTERM, signal_handler)
     
     try:
+        # Create and run the vision system node
         vision_system_node = UnifiedVisionSystem()
         vision_system_node.run()
     except Exception as e:
+        # Log any exceptions that occur during node initialization or run
         if rclpy.ok():
             node_for_logging = rclpy.create_node("unified_vision_system_crash_logger")
             node_for_logging.get_logger().fatal(f"Unhandled exception in UnifiedVisionSystem: {e}", exc_info=True)

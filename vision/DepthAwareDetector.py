@@ -294,7 +294,7 @@ class DepthAwareDetector:
         raw_depth_image_np: np.ndarray,
         vlm_detections: List[Tuple[str, float, List[int]]],
         grasp_detector: GraspPointDetector,
-        current_gripper_pose: Optional[np.ndarray] = None  # NEW PARAMETER
+        current_gripper_pose: Optional[np.ndarray] = None
     ) -> List[Detection3D]:
         """
         Augment 2D detections with depth information and 3D properties.
@@ -323,9 +323,32 @@ class DepthAwareDetector:
         if len(vlm_detections) == 0:
             return []
 
-        filtered_depth = self._apply_depth_filters(depth_frame_rs) if depth_frame_rs else raw_depth_image_np
+        # Apply RealSense depth filters if available
+        if depth_frame_rs and self.use_filters:
+            filtered_depth = self._apply_depth_filters(depth_frame_rs)
+        else:
+            filtered_depth = raw_depth_image_np
 
-        def _apply_depth_filters(self, depth_frame: rs.frame) -> np.ndarray:
+        detections_3d = []
+        
+        for label, confidence, bbox_2d in vlm_detections:
+            # Get grasp information
+            x1, y1, x2, y2 = bbox_2d
+            roi = color_image_np[y1:y2, x1:x2]
+            grasp_info = grasp_detector.detect_grasp_point(roi)
+            
+            # Calculate 3D properties with filtered depth
+            detection_3d = self._calculate_3d_properties(
+                label, confidence, bbox_2d, filtered_depth, grasp_info, current_gripper_pose
+            )
+            
+            if detection_3d:
+                detections_3d.append(detection_3d)
+                self.logger.info(f"Created 3D detection for {label} at {detection_3d.grasp_point_3d}")
+        
+        return detections_3d
+    
+    def _apply_depth_filters(self, depth_frame: rs.frame) -> np.ndarray:
             """Apply optimized D435i depth filters in sequence."""
             if not self.use_filters or not all([
                 self.decimation_filter,

@@ -24,7 +24,7 @@ except ImportError as e:
 
 # Try to import ur_ikfast for high-speed analytical IK
 try:
-    import ur_ikfast as ur_ik
+    from ur_ikfast.ur_kinematics import URKinematics
     UR_IKFAST_AVAILABLE = True
     print("ur_ikfast imported successfully - hybrid IK enabled")
 except ImportError:
@@ -143,21 +143,22 @@ class HybridUR5eKinematics:
         if not self.ikfast_available:
             return []
         
+        ur5e_arm = URKinematics('ur5e')
         start_time = time.perf_counter()
         self.ikfast_attempts += 1
         
         try:
-            position = target_pose[:3, 3].tolist()
+            position = target_pose[:3, 3]
             rotation = target_pose[:3, :3]
             
             # Convert rotation matrix to quaternion (w, x, y, z)
             quat = self._rotation_matrix_to_quaternion(rotation)
             
-            # Call ur_ikfast
-            joint_configs = ur_ik.get_ik(
-                position, 
-                quat, 
-                [0.0] * 6  # Free joint values (usually all zeros)
+            # Call ur_ikfast with numpy arrays
+            joint_configs = ur5e_arm.inverse(
+                position,
+                False,           # closest_only: False to get all solutions
+                np.array([0.0] * 6) # seed for IK solver as numpy array
             )
             
             solutions = []
