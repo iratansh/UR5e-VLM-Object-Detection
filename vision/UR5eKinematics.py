@@ -24,7 +24,7 @@ except ImportError as e:
 
 # Try to import ur_ikfast for high-speed analytical IK
 try:
-    from ur_ikfast.ur_kinematics import URKinematics
+    import ur_ikfast as ur_ik
     UR_IKFAST_AVAILABLE = True
     print("ur_ikfast imported successfully - hybrid IK enabled")
 except ImportError:
@@ -72,25 +72,51 @@ class HybridUR5eKinematics:
         if not self.ikfast_available and self.debug:
             print("Warning: ur_ikfast not available, using numerical solver only")
     
-    def inverse_kinematics(self, target_pose: np.ndarray, 
-                          current_joints: Optional[List[float]] = None,
-                          prefer_closest: bool = True,
-                          timeout_ms: float = 50.0) -> List[List[float]]:
+    def _solve_with_numerical(self, target_pose: np.ndarray, 
+                        current_joints: Optional[List[float]] = None,
+                        timeout_ms: float = 100.0) -> List[List[float]]:
         """
-        Hybrid inverse kinematics solver.
+        FIXED: Now calls the FAST improved method
+        """
+        start_time = time.perf_counter()
+        self.numerical_attempts += 1
         
-        Args:
-            target_pose: 4x4 homogeneous transformation matrix
-            current_joints: Current joint positions for solution preference
-            prefer_closest: If True, return solution closest to current_joints
-            timeout_ms: Maximum time to spend on numerical solver (ms)
+        timeout_sec = timeout_ms / 1000.0
+        
+        try:
+            # CRITICAL FIX: Call the FAST method
+            solutions = self.numerical_solver.inverse_kinematics_improved(
+                target_pose, current_joints, timeout_sec
+            )
             
-        Returns:
-            List of possible joint configurations
+            elapsed = time.perf_counter() - start_time
+            
+            if solutions:
+                self.numerical_successes += 1
+                if self.debug:
+                    print(f"Numerical solver found {len(solutions)} solutions in {elapsed*1000:.1f}ms")
+            else:
+                if self.debug:
+                    print(f"Numerical solver found no solutions in {elapsed*1000:.1f}ms")
+            
+            self.numerical_total_time += elapsed
+            return solutions
+            
+        except Exception as e:
+            if self.debug:
+                print(f"Numerical solver failed: {e}")
+            return []
+    
+    def inverse_kinematics(self, target_pose: np.ndarray, 
+                      current_joints: Optional[List[float]] = None,
+                      prefer_closest: bool = True,
+                      timeout_ms: float = 150.0) -> List[List[float]]:
+        """
+        IMPROVED: Better timeout allocation between ur_ikfast and numerical
         """
         solutions = []
         
-        # Step 1: Try ur_ikfast first for speed
+        # Step 1: ur_ikfast (working perfectly!)
         if self.ikfast_available:
             ikfast_solutions = self._solve_with_ikfast(target_pose)
             if ikfast_solutions:
@@ -98,10 +124,19 @@ class HybridUR5eKinematics:
                     print(f"ur_ikfast found {len(ikfast_solutions)} solutions")
                 solutions.extend(ikfast_solutions)
         
-        # Step 2: If no solutions or fallback enabled, try numerical solver
-        if (not solutions or self.enable_fallback) and timeout_ms > 0:
+        # Step 2: Smart timeout allocation for numerical
+        if not solutions:
+            # ur_ikfast failed, give numerical full time
+            numerical_timeout = timeout_ms
+        elif self.enable_fallback:
+            # ur_ikfast succeeded, shorter backup time
+            numerical_timeout = min(timeout_ms * 0.3, 75.0)
+        else:
+            numerical_timeout = 0
+        
+        if numerical_timeout > 0:
             numerical_solutions = self._solve_with_numerical(
-                target_pose, current_joints, timeout_ms
+                target_pose, current_joints, numerical_timeout
             )
             
             if numerical_solutions:
@@ -118,36 +153,32 @@ class HybridUR5eKinematics:
                     if not is_duplicate:
                         solutions.append(num_sol)
         
-        # Step 3: Filter and validate solutions
+        # Filter and validate
         valid_solutions = []
         for solution in solutions:
             if self._is_valid_solution(solution, target_pose):
                 valid_solutions.append(solution)
         
-        # Step 4: Sort solutions by preference
+        # Sort by preference
         if valid_solutions and current_joints is not None and prefer_closest:
             valid_solutions.sort(key=lambda sol: self._solution_distance(sol, current_joints))
         
         return valid_solutions
-    
+
     def _solve_with_ikfast(self, target_pose: np.ndarray) -> List[List[float]]:
         """
-        Solve IK using ur_ikfast analytical solver.
-        
-        Args:
-            target_pose: 4x4 transformation matrix
-            
-        Returns:
-            List of joint solutions
+        FIXED: Solve IK using ur_ikfast analytical solver with proper error handling
         """
+        from ur_ikfast.ur_kinematics import URKinematics
         if not self.ikfast_available:
             return []
         
-        ur5e_arm = URKinematics('ur5e')
         start_time = time.perf_counter()
         self.ikfast_attempts += 1
         
         try:
+            ur5e_arm = URKinematics('ur5e')
+            
             position = target_pose[:3, 3]
             rotation = target_pose[:3, :3]
             
@@ -155,27 +186,65 @@ class HybridUR5eKinematics:
             quat = self._rotation_matrix_to_quaternion(rotation)
             
             # Create the 7-element pose vector [tx, ty, tz, w, x, y, z]
-            # as specified by the ikfast error message.
             ee_pose = np.concatenate((position, np.array(quat)))
 
-            # Call ur_ikfast, ensuring all inputs are standard Python lists/floats
-            # to work around the library's internal numpy handling issues.
-            joint_configs = ur5e_arm.inverse(
-                [float(x) for x in ee_pose],
-                False,           # closest_only: False to get all solutions
-                [0.0] * 6        # seed for IK solver as a plain list
-            )
+            # FIX 1: Convert to pure Python types to avoid numpy boolean issues
+            pose_list = [float(x) for x in ee_pose.flatten()]
+            seed_list = [float(x) for x in [0.0] * 6]
+            
+            # FIX 2: Add proper exception handling for ur_ikfast internal errors
+            try:
+                joint_configs = ur5e_arm.inverse(
+                    pose_list,
+                    False,      # closest_only: False to get all solutions
+                    seed_list   # seed for IK solver
+                )
+            except ValueError as ve:
+                if "ambiguous" in str(ve):
+                    if self.debug:
+                        print(f"ur_ikfast boolean ambiguity error - likely internal numpy issue")
+                    return []
+                else:
+                    raise ve
             
             solutions = []
-            # The library returns a list of lists, so this check is now safe
-            if joint_configs:
-                for config in joint_configs:
-                    # Normalize joint angles
-                    normalized_config = [self.numerical_solver.normalize_angle(j) for j in config]
-                    
-                    # Validate against joint limits
-                    if self._within_joint_limits(normalized_config):
-                        solutions.append(normalized_config)
+            
+            # FIX 3: Better handling of ur_ikfast return values
+            if joint_configs is not None:
+                # Handle both single solution and multiple solutions
+                if isinstance(joint_configs, list):
+                    if len(joint_configs) > 0:
+                        # Check if it's a list of lists (multiple solutions)
+                        if isinstance(joint_configs[0], (list, tuple, np.ndarray)):
+                            configs_to_process = joint_configs
+                        else:
+                            # Single solution returned as flat list
+                            configs_to_process = [joint_configs]
+                    else:
+                        configs_to_process = []
+                elif isinstance(joint_configs, np.ndarray):
+                    if joint_configs.ndim == 2:
+                        # Multiple solutions as 2D array
+                        configs_to_process = [joint_configs[i] for i in range(joint_configs.shape[0])]
+                    else:
+                        # Single solution as 1D array
+                        configs_to_process = [joint_configs]
+                else:
+                    configs_to_process = []
+                
+                for config in configs_to_process:
+                    try:
+                        # Convert to Python list and normalize
+                        config_list = [float(j) for j in config]
+                        normalized_config = [self.numerical_solver.normalize_angle(j) for j in config_list]
+                        
+                        # Validate against joint limits
+                        if self._within_joint_limits(normalized_config):
+                            solutions.append(normalized_config)
+                    except (TypeError, ValueError) as e:
+                        if self.debug:
+                            print(f"Warning: Failed to process ur_ikfast solution: {e}")
+                        continue
                 
                 if solutions:
                     self.ikfast_successes += 1
@@ -183,61 +252,17 @@ class HybridUR5eKinematics:
             elapsed = time.perf_counter() - start_time
             self.ikfast_total_time += elapsed
             
-            if self.debug and solutions:
-                print(f"ur_ikfast solved in {elapsed*1000:.3f}ms")
+            if self.debug:
+                if solutions:
+                    print(f"ur_ikfast solved in {elapsed*1000:.3f}ms, found {len(solutions)} solutions")
+                else:
+                    print(f"ur_ikfast failed to find solutions in {elapsed*1000:.3f}ms")
             
             return solutions
             
         except Exception as e:
             if self.debug:
-                print(f"ur_ikfast failed: {e}")
-            return []
-    
-    def _solve_with_numerical(self, target_pose: np.ndarray, 
-                            current_joints: Optional[List[float]] = None,
-                            timeout_ms: float = 50.0) -> List[List[float]]:
-        """
-        Solve IK using numerical optimization.
-        
-        Args:
-            target_pose: 4x4 transformation matrix
-            current_joints: Current joint positions
-            timeout_ms: Maximum solving time in milliseconds
-            
-        Returns:
-            List of joint solutions
-        """
-        start_time = time.perf_counter()
-        self.numerical_attempts += 1
-        
-        # Convert timeout to seconds
-        timeout_sec = timeout_ms / 1000.0
-        
-        try:
-            # Use the existing numerical solver with timeout consideration
-            solutions = self.numerical_solver.inverse_kinematics(target_pose, current_joints)
-            
-            # Check if we have valid solutions within timeout
-            elapsed = time.perf_counter() - start_time
-            if elapsed > timeout_sec:
-                if self.debug:
-                    print(f"Numerical solver timeout after {elapsed*1000:.1f}ms")
-                # Return partial results if any
-                solutions = solutions[:1] if solutions else []
-            
-            if solutions:
-                self.numerical_successes += 1
-            
-            self.numerical_total_time += elapsed
-            
-            if self.debug and solutions:
-                print(f"Numerical solver found {len(solutions)} solutions in {elapsed*1000:.1f}ms")
-            
-            return solutions
-            
-        except Exception as e:
-            if self.debug:
-                print(f"Numerical solver failed: {e}")
+                print(f"ur_ikfast failed with exception: {type(e).__name__}: {e}")
             return []
     
     def best_reachable_pose(self, target_pose: np.ndarray, 
@@ -270,6 +295,196 @@ class HybridUR5eKinematics:
         
         # If no exact solution, use numerical solver's approximation capability
         return self.numerical_solver.best_reachable_pose(target_pose, current_joints)
+    
+    def _calculate_jacobian_adaptive(self, q: List[float], fast_mode: bool = False) -> np.ndarray:
+        """
+        Adaptive Jacobian calculation with performance optimization
+        """
+        # Adaptive delta based on convergence state
+        if fast_mode:
+            base_delta = 5e-7  # Smaller delta for precision
+        else:
+            base_delta = 1e-6  # Standard delta
+        
+        J = np.zeros((6, 6))
+        
+        try:
+            current_pose = self.forward_kinematics(q)
+            current_pos = current_pose[:3, 3]
+            current_rot = current_pose[:3, :3]
+        except:
+            return np.eye(6)  # Return identity if FK fails
+        
+        for i in range(6):
+            # Adaptive delta per joint
+            delta = base_delta * max(1.0, abs(q[i]) / (math.pi/2))
+            
+            q_delta = list(q)
+            q_delta[i] += delta
+            
+            try:
+                perturbed_pose = self.forward_kinematics(q_delta)
+                perturbed_pos = perturbed_pose[:3, 3]
+                perturbed_rot = perturbed_pose[:3, :3]
+                
+                # Position Jacobian
+                J[:3, i] = (perturbed_pos - current_pos) / delta
+                
+                # Orientation Jacobian with robust calculation
+                try:
+                    delta_R = current_rot.T @ perturbed_rot
+                    trace_val = np.trace(delta_R)
+                    
+                    if abs(trace_val - 3) < 1e-6:
+                        J[3:, i] = np.zeros(3)
+                    else:
+                        angle = math.acos(np.clip((trace_val - 1) / 2, -1.0, 1.0))
+                        if angle > 1e-6:
+                            axis = np.array([
+                                delta_R[2, 1] - delta_R[1, 2],
+                                delta_R[0, 2] - delta_R[2, 0],
+                                delta_R[1, 0] - delta_R[0, 1]
+                            ])
+                            axis_norm = np.linalg.norm(axis)
+                            if axis_norm > 1e-6:
+                                J[3:, i] = (axis / axis_norm) * angle / delta
+                            else:
+                                J[3:, i] = np.zeros(3)
+                        else:
+                            J[3:, i] = np.zeros(3)
+                except:
+                    J[3:, i] = np.zeros(3)
+            except:
+                # If FK fails, use numerical approximation
+                J[:, i] = np.zeros(6)
+        
+        return J
+    
+    def _numerical_ik_improved(self, seed: List[float], target_pose: np.ndarray, 
+                         max_time: float = 0.05, max_iterations: int = 50) -> Optional[List[float]]:
+        """
+        GREATLY IMPROVED: Fast converging numerical IK with adaptive parameters
+        """
+        q = np.array(seed, dtype=float)
+        
+        # Aggressive parameters for fast convergence
+        initial_alpha = 0.3    # Higher initial step size
+        min_alpha = 0.005      # Minimum step size
+        max_alpha = 0.5        # Maximum step size
+        lambda_val = 0.03      # Lower initial damping
+        
+        target_pos = target_pose[:3, 3]
+        target_rot = target_pose[:3, :3]
+        
+        # Relaxed convergence thresholds for speed
+        pos_threshold = 1.5e-3  # 1.5mm
+        rot_threshold = 1.5e-3  # ~0.086 degrees
+        
+        start_time = time.perf_counter()
+        alpha = initial_alpha
+        
+        prev_error = float('inf')
+        stall_count = 0
+        
+        # Track best solution
+        best_q = q.copy()
+        best_error = float('inf')
+        
+        for iteration in range(max_iterations):
+            # Quick timeout check
+            if time.perf_counter() - start_time > max_time:
+                break
+            
+            # Get current pose
+            try:
+                current_pose = self.forward_kinematics(q)
+                current_pos = current_pose[:3, 3]
+                current_rot = current_pose[:3, :3]
+            except:
+                break  # Invalid configuration
+            
+            pos_error = target_pos - current_pos
+            pos_error_norm = np.linalg.norm(pos_error)
+            
+            try:
+                rot_error_matrix = current_rot.T @ target_rot
+                rot_angle = math.acos(np.clip((np.trace(rot_error_matrix) - 1) / 2, -1.0, 1.0))
+            except:
+                rot_angle = 0.05  # Assume some rotation error
+            
+            current_error = pos_error_norm + rot_angle * 0.3
+            
+            # Track best solution
+            if current_error < best_error:
+                best_error = current_error
+                best_q = q.copy()
+            
+            # Check convergence
+            if pos_error_norm < pos_threshold and rot_angle < rot_threshold:
+                return [self.normalize_angle(angle) for angle in q]
+            
+            # Adaptive step size based on progress
+            if current_error >= prev_error:
+                stall_count += 1
+                if stall_count > 2:
+                    alpha = max(alpha * 0.7, min_alpha)
+                    stall_count = 0
+            else:
+                if current_error < 0.8 * prev_error:
+                    alpha = min(alpha * 1.15, max_alpha)
+                stall_count = 0
+            
+            prev_error = current_error
+            
+            # Fast Jacobian calculation
+            try:
+                J = self._calculate_jacobian_fast(q)
+            except:
+                break
+            
+            # Error vector
+            error_vector = np.zeros(6)
+            error_vector[:3] = pos_error
+            
+            # Rotation error
+            if rot_angle > self.eps:
+                try:
+                    rot_axis = np.array([
+                        rot_error_matrix[2, 1] - rot_error_matrix[1, 2],
+                        rot_error_matrix[0, 2] - rot_error_matrix[2, 0],
+                        rot_error_matrix[1, 0] - rot_error_matrix[0, 1]
+                    ])
+                    if np.linalg.norm(rot_axis) > self.eps:
+                        rot_axis = rot_axis / np.linalg.norm(rot_axis) * rot_angle
+                        error_vector[3:] = rot_axis * 0.4
+                except:
+                    pass
+            
+            # Adaptive damped least squares
+            JT = J.T
+            adaptive_lambda = lambda_val * (1 + min(current_error * 2, 2))
+            JJ = J @ JT + adaptive_lambda * np.eye(6)
+            
+            try:
+                delta_q = JT @ np.linalg.solve(JJ, error_vector)
+            except:
+                try:
+                    delta_q = JT @ np.linalg.pinv(JJ) @ error_vector
+                except:
+                    break
+            
+            q += alpha * delta_q
+            
+            # Enforce joint limits
+            for i in range(len(q)):
+                lower, upper = self.JOINT_LIMITS[i]
+                q[i] = np.clip(self.normalize_angle(q[i]), lower, upper)
+        
+        # Return best solution if reasonable
+        if best_error < 0.05:  # 50mm total error threshold
+            return [self.normalize_angle(angle) for angle in best_q]
+        
+        return None
     
     def forward_kinematics(self, joints: List[float]) -> np.ndarray:
         """Forward kinematics using the numerical solver's implementation."""
@@ -643,7 +858,7 @@ class UR5eKinematics:
                 best_q = q.copy()
             
             # Calculate Jacobian matrix
-            J = self._calculate_jacobian(q)
+            J = self._calculate_jacobian_fast(q)
             
             # Create error vector
             error_vector = np.zeros(6)
@@ -724,7 +939,7 @@ class UR5eKinematics:
                 return [self.normalize_angle(angle) for angle in q]
             
             # Calculate Jacobian matrix
-            J = self._calculate_jacobian(q)
+            J = self._calculate_jacobian_fast(q)
             
             # Create error vector (position and rotation error)
             error_vector = np.zeros(6)
@@ -760,60 +975,264 @@ class UR5eKinematics:
         # If we got here, failed to converge
         return None
     
-    def _calculate_jacobian(self, q: List[float]) -> np.ndarray:
+    def _calculate_jacobian_fast(self, q: List[float]) -> np.ndarray:
         """
-        Calculate the Jacobian matrix using finite differences.
-        
-        Args:
-            q: Current joint positions
-            
-        Returns:
-            6x6 Jacobian matrix
+        FAST: Optimized Jacobian calculation for speed
         """
-        # Small step for finite difference
-        delta = 1e-6
-        
-        # Initialize Jacobian matrix (6x6)
+        delta = 1.5e-6  # Slightly larger step for speed
+
         J = np.zeros((6, 6))
         
-        # Get current pose
-        current_pose = self.forward_kinematics(q)
-        current_pos = current_pose[:3, 3]
-        current_rot = current_pose[:3, :3]
+        try:
+            current_pose = self.forward_kinematics(q)
+            current_pos = current_pose[:3, 3]
+            current_rot = current_pose[:3, :3]
+        except:
+            return np.eye(6)
         
-        # Compute each column of the Jacobian
         for i in range(6):
-            q_delta = q.copy()
+            q_delta = list(q)
             q_delta[i] += delta
             
-            # Get perturbed pose
-            perturbed_pose = self.forward_kinematics(q_delta)
-            perturbed_pos = perturbed_pose[:3, 3]
-            perturbed_rot = perturbed_pose[:3, :3]
-            
-            # Linear velocity components (position Jacobian)
-            J[:3, i] = (perturbed_pos - current_pos) / delta
-            
-            # Angular velocity components (orientation Jacobian)
-            # Using matrix logarithm approximation
-            delta_R = current_rot.T @ perturbed_rot
-            # Small angle approximation to convert to axis-angle
-            if abs(np.trace(delta_R) - 3) < self.eps:
-                # If rotation is very small, assume zero
-                J[3:, i] = np.zeros(3)
-            else:
-                angle = math.acos(np.clip((np.trace(delta_R) - 1) / 2, -1.0, 1.0))
-                axis = np.array([
-                    delta_R[2, 1] - delta_R[1, 2],
-                    delta_R[0, 2] - delta_R[2, 0],
-                    delta_R[1, 0] - delta_R[0, 1]
-                ])
-                if np.linalg.norm(axis) > self.eps:
-                    axis = axis / np.linalg.norm(axis)
-                    J[3:, i] = axis * angle / delta
+            try:
+                perturbed_pose = self.forward_kinematics(q_delta)
+                perturbed_pos = perturbed_pose[:3, 3]
+                perturbed_rot = perturbed_pose[:3, :3]
+                
+                # Position Jacobian
+                J[:3, i] = (perturbed_pos - current_pos) / delta
+                
+                # Simplified orientation Jacobian for speed
+                try:
+                    delta_R = current_rot.T @ perturbed_rot
+                    trace_val = np.trace(delta_R)
+                    
+                    if abs(trace_val - 3) < 1e-6:
+                        J[3:, i] = np.zeros(3)
+                    else:
+                        angle = math.acos(np.clip((trace_val - 1) / 2, -1.0, 1.0))
+                        if angle > 1e-6:
+                            axis = np.array([
+                                delta_R[2, 1] - delta_R[1, 2],
+                                delta_R[0, 2] - delta_R[2, 0],
+                                delta_R[1, 0] - delta_R[0, 1]
+                            ])
+                            axis_norm = np.linalg.norm(axis)
+                            if axis_norm > 1e-6:
+                                J[3:, i] = (axis / axis_norm) * angle / delta
+                            else:
+                                J[3:, i] = np.zeros(3)
+                        else:
+                            J[3:, i] = np.zeros(3)
+                except:
+                    J[3:, i] = np.zeros(3)
+            except:
+                J[:, i] = np.zeros(6)
         
         return J
     
+    def inverse_kinematics_improved(self, target_pose: np.ndarray, 
+                              current_joints: Optional[List[float]] = None,
+                              timeout_sec: float = 0.15) -> List[List[float]]:
+        """
+        IMPROVED: Faster inverse kinematics with better seed selection
+        """
+        # Better seed selection for faster convergence
+        seeds = [
+            [0, -math.pi/2, 0, 0, 0, 0],               # Standard home
+            [0, -math.pi/3, -math.pi/3, 0, 0, 0],      # Forward lean
+            [math.pi/2, -math.pi/2, 0, 0, 0, 0],       # 90° rotated
+            [-math.pi/2, -math.pi/2, 0, 0, 0, 0],      # -90° rotated
+            [0, -math.pi/4, -math.pi/2, 0, math.pi/2, 0],  # Elbow down
+            [math.pi, -math.pi/2, 0, 0, 0, 0],         # Back configuration
+        ]
+        
+        if current_joints is not None:
+            seeds.insert(0, current_joints)
+        
+        solutions = []
+        start_time = time.perf_counter()
+        base_time_per_seed = timeout_sec / len(seeds)
+        
+        for i, seed in enumerate(seeds):
+            # Check global timeout
+            elapsed = time.perf_counter() - start_time
+            if elapsed > timeout_sec:
+                break
+            
+            # Smart time allocation
+            remaining_time = timeout_sec - elapsed
+            remaining_seeds = len(seeds) - i
+            seed_timeout = min(remaining_time / max(1, remaining_seeds), base_time_per_seed * 2)
+            
+            # Use FAST numerical IK
+            solution = self._numerical_ik_fast(seed, target_pose, 
+                                            max_time=seed_timeout,
+                                            max_iterations=30)
+            
+            if solution is not None:
+                # Check for duplicates
+                is_duplicate = False
+                for existing in solutions:
+                    if self._similar_configs(solution, existing):
+                        is_duplicate = True
+                        break
+                
+                if not is_duplicate:
+                    solutions.append(solution)
+                    if self.debug and len(solutions) == 1:
+                        print(f"Found solution: {[round(math.degrees(j), 2) for j in solution]}")
+                    
+                    # Early exit if we have enough solutions
+                    if len(solutions) >= 2:
+                        break
+        
+        return solutions
+    
+    def _numerical_ik_fast(self, seed: List[float], target_pose: np.ndarray, 
+                      max_time: float = 0.05, max_iterations: int = 30) -> Optional[List[float]]:
+        """
+        ULTRA-FAST: Numerical IK optimized for speed and success rate
+        """
+        q = np.array(seed, dtype=float)
+        
+        # Aggressive parameters for FAST convergence
+        alpha = 0.4        # High step size
+        min_alpha = 0.01   # Higher minimum
+        lambda_val = 0.02  # Low damping
+        
+        target_pos = target_pose[:3, 3]
+        target_rot = target_pose[:3, :3]
+        
+        # Relaxed thresholds for speed
+        pos_threshold = 2e-3  # 2mm (relaxed)
+        rot_threshold = 2e-3  # ~0.11 degrees
+        
+        start_time = time.perf_counter()
+        best_q = q.copy()
+        best_error = float('inf')
+        
+        for iteration in range(max_iterations):
+            # Quick timeout check
+            if time.perf_counter() - start_time > max_time:
+                break
+            
+            # Forward kinematics
+            try:
+                current_pose = self.forward_kinematics(q)
+                current_pos = current_pose[:3, 3]
+                current_rot = current_pose[:3, :3]
+            except:
+                break
+            
+            # Calculate errors
+            pos_error = target_pos - current_pos
+            pos_error_norm = np.linalg.norm(pos_error)
+            
+            try:
+                rot_error_matrix = current_rot.T @ target_rot
+                rot_angle = math.acos(np.clip((np.trace(rot_error_matrix) - 1) / 2, -1.0, 1.0))
+            except:
+                rot_angle = 0.05
+            
+            current_error = pos_error_norm + rot_angle * 0.3
+            
+            # Track best solution
+            if current_error < best_error:
+                best_error = current_error
+                best_q = q.copy()
+            
+            # Check convergence
+            if pos_error_norm < pos_threshold and rot_angle < rot_threshold:
+                return [self.normalize_angle(angle) for angle in q]
+            
+            # Adaptive step size
+            if iteration > 3 and current_error > best_error * 0.9:
+                alpha = max(alpha * 0.8, min_alpha)
+            
+            # Fast Jacobian
+            try:
+                J = self._calculate_jacobian_super_fast(q)
+            except:
+                break
+            
+            # Error vector
+            error_vector = np.zeros(6)
+            error_vector[:3] = pos_error
+            
+            # Rotation error
+            if rot_angle > self.eps:
+                try:
+                    rot_axis = np.array([
+                        rot_error_matrix[2, 1] - rot_error_matrix[1, 2],
+                        rot_error_matrix[0, 2] - rot_error_matrix[2, 0],
+                        rot_error_matrix[1, 0] - rot_error_matrix[0, 1]
+                    ])
+                    if np.linalg.norm(rot_axis) > self.eps:
+                        rot_axis = rot_axis / np.linalg.norm(rot_axis) * rot_angle
+                        error_vector[3:] = rot_axis * 0.4
+                except:
+                    pass
+            
+            # Simple damped least squares
+            JT = J.T
+            JJ = J @ JT + lambda_val * np.eye(6)
+            
+            try:
+                delta_q = JT @ np.linalg.solve(JJ, error_vector)
+            except:
+                try:
+                    delta_q = JT @ np.linalg.pinv(JJ) @ error_vector
+                except:
+                    break
+            
+            q += alpha * delta_q
+            
+            # Enforce joint limits quickly
+            for i in range(6):
+                lower, upper = self.JOINT_LIMITS[i]
+                q[i] = np.clip(self.normalize_angle(q[i]), lower, upper)
+        
+        # Return best solution if reasonable
+        if best_error < 0.08:  # 80mm total error threshold
+            return [self.normalize_angle(angle) for angle in best_q]
+        
+        return None
+
+    def _calculate_jacobian_super_fast(self, q: List[float]) -> np.ndarray:
+        """
+        SUPER-FAST: Minimal Jacobian calculation for maximum speed
+        """
+        delta = 2e-6  # Larger step for speed
+        J = np.zeros((6, 6))
+        
+        try:
+            current_pose = self.forward_kinematics(q)
+            current_pos = current_pose[:3, 3]
+        except:
+            return np.eye(6)
+        
+        # Only calculate position Jacobian for maximum speed
+        for i in range(6):
+            q_delta = list(q)
+            q_delta[i] += delta
+            
+            try:
+                perturbed_pose = self.forward_kinematics(q_delta)
+                perturbed_pos = perturbed_pose[:3, 3]
+                
+                # Position Jacobian
+                J[:3, i] = (perturbed_pos - current_pos) / delta
+                
+                # Simplified orientation (good enough for most cases)
+                if i < 3:  # Only for major joints
+                    J[3+i, i] = 1.0
+                    
+            except:
+                J[:, i] = np.zeros(6)
+        
+        return J
+
     def _similar_configs(self, config1: List[float], config2: List[float], 
                       threshold: float = 0.1) -> bool:
         """

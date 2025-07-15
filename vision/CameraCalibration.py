@@ -848,3 +848,98 @@ class CameraCalibration:
         
         # For eye-in-hand: T_base_camera = T_base_gripper * T_gripper_camera
         return current_gripper_pose @ self.T_gripper_to_camera
+    
+    def set_mock_calibration(self, camera_matrix: np.ndarray, 
+                         eye_in_hand: bool = False,
+                         T_gripper_camera: Optional[np.ndarray] = None,
+                         T_base_camera: Optional[np.ndarray] = None):
+        """
+        Set mock calibration parameters for simulation/testing.
+        
+        This method allows setting calibration parameters without loading from files,
+        useful for testing and simulation environments.
+        
+        Parameters
+        ----------
+        camera_matrix : np.ndarray
+            3x3 camera intrinsic matrix
+        eye_in_hand : bool, optional
+            True if camera is mounted on gripper, False if stationary
+        T_gripper_camera : Optional[np.ndarray]
+            4x4 transformation matrix from gripper to camera (for eye-in-hand)
+        T_base_camera : Optional[np.ndarray]
+            4x4 transformation matrix from base to camera (for eye-to-hand)
+            
+        Examples
+        --------
+        >>> calibration = CameraCalibration()
+        >>> calibration.set_mock_calibration(
+        ...     camera_matrix=np.array([[421.61, 0, 424], [0, 421.61, 240], [0, 0, 1]]),
+        ...     eye_in_hand=True,
+        ...     T_gripper_camera=np.eye(4)
+        ... )
+        """
+        # Set camera intrinsics
+        if camera_matrix.shape != (3, 3):
+            raise ValueError(f"Camera matrix must be 3x3, got {camera_matrix.shape}")
+        
+        self.camera_matrix_color = camera_matrix.astype(np.float64)
+        
+        # Set distortion coefficients to zero for mock setup
+        self.dist_coeffs_color = np.zeros(5, dtype=np.float64)
+        
+        # Set configuration type
+        self.is_eye_in_hand = eye_in_hand
+        
+        # Set hand-eye calibration
+        if eye_in_hand:
+            if T_gripper_camera is None:
+                # Default to identity if not provided
+                T_gripper_camera = np.eye(4)
+            
+            self._validate_transform(T_gripper_camera)
+            self.T_gripper_to_camera = T_gripper_camera.copy()
+            self.T_camera_to_gripper = np.linalg.inv(T_gripper_camera)
+            
+            # Set base-to-camera transforms to identity for eye-in-hand
+            # (these are not used in eye-in-hand mode but keep them consistent)
+            self.T_base_to_camera = np.eye(4)
+            self.T_camera_to_base = np.eye(4)
+            
+            self.logger.info(f"Mock calibration set for eye-in-hand configuration")
+            self.logger.info(f"Camera offset from gripper: {T_gripper_camera[:3, 3]}")
+            
+        else:
+            if T_base_camera is None:
+                # Default to identity if not provided
+                T_base_camera = np.eye(4)
+                
+            self._validate_transform(T_base_camera)
+            self.T_base_to_camera = T_base_camera.copy()
+            self.T_camera_to_base = np.linalg.inv(T_base_camera)
+            
+            # Set gripper-to-camera transforms to identity for eye-to-hand
+            # (these are not used in eye-to-hand mode but keep them consistent)
+            self.T_gripper_to_camera = np.eye(4)
+            self.T_camera_to_gripper = np.eye(4)
+            
+            self.logger.info(f"Mock calibration set for eye-to-hand configuration")
+            self.logger.info(f"Camera position in base frame: {T_base_camera[:3, 3]}")
+        
+        # Set source type to indicate mock data
+        self.source_type = "mock"
+        
+        # If ROS2 node is available, broadcast the transforms
+        if self.node:
+            if eye_in_hand:
+                # For eye-in-hand, we need current gripper pose to broadcast
+                # Just broadcast the static gripper-to-camera offset
+                self.broadcast_hand_eye_transform()
+            else:
+                # For eye-to-hand, broadcast the static transform
+                self.broadcast_hand_eye_transform()
+        
+        self.logger.info(f"Mock calibration parameters set successfully:")
+        self.logger.info(f"  Camera matrix fx={camera_matrix[0, 0]:.2f}, fy={camera_matrix[1, 1]:.2f}")
+        self.logger.info(f"  Principal point: ({camera_matrix[0, 2]:.1f}, {camera_matrix[1, 2]:.1f})")
+        self.logger.info(f"  Configuration: {'eye-in-hand' if eye_in_hand else 'eye-to-hand'}")

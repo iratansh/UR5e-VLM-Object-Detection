@@ -22,7 +22,6 @@ from PIL import Image
 import speech_recognition as sr
 import threading
 import queue
-from ObjectDetection import ObjectDetection
 from CameraCalibration import CameraCalibration
 from WorkSpaceValidator import WorkspaceValidator
 from transformers import OwlViTProcessor, OwlViTForObjectDetection

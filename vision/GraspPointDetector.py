@@ -9,6 +9,7 @@ from typing import List, Tuple, Dict, Optional
 import logging
 from scipy import ndimage
 from skimage import morphology, measure
+from WorkSpaceValidator import WorkspaceValidator  
 
 class GraspPointDetector:
     """
