@@ -196,7 +196,7 @@ class HybridUR5eKinematics:
             try:
                 joint_configs = ur5e_arm.inverse(
                     pose_list,
-                    False,      # closest_only: False to get all solutions
+                    False,      # closest_only
                     seed_list   # seed for IK solver
                 )
             except ValueError as ve:

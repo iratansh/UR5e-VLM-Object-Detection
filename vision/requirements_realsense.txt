@@ -1,0 +1,21 @@
+# RealSense D435i Camera Requirements
+pyrealsense2>=2.54.1
+opencv-python>=4.8.0
+numpy>=1.24.0
+
+# Vision and AI requirements
+torch>=2.0.0
+torchvision>=0.15.0
+transformers>=4.30.0
+pillow>=10.0.0
+
+# Speech processing
+speechrecognition>=3.10.0
+pyaudio>=0.2.11
+
+# NLP
+spacy>=3.6.0
+nltk>=3.8.0
+
+# ROS2 dependencies (if available)
+# These will be installed via rosdep in the container
