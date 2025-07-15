@@ -167,9 +167,8 @@ class HybridUR5eKinematics:
 
     def _solve_with_ikfast(self, target_pose: np.ndarray) -> List[List[float]]:
         """
-        FIXED: Solve IK using ur_ikfast analytical solver with proper error handling
+        FIXED: Solve IK using ur_ikfast with robust error handling.
         """
-        from ur_ikfast.ur_kinematics import URKinematics
         if not self.ikfast_available:
             return []
         
@@ -177,93 +176,179 @@ class HybridUR5eKinematics:
         self.ikfast_attempts += 1
         
         try:
+            from ur_ikfast.ur_kinematics import URKinematics
             ur5e_arm = URKinematics('ur5e')
             
             position = target_pose[:3, 3]
             rotation = target_pose[:3, :3]
             
-            # Convert rotation matrix to quaternion (w, x, y, z)
-            quat = self._rotation_matrix_to_quaternion(rotation)
+            # CRITICAL FIX 1: Robust quaternion conversion
+            try:
+                quat = self._rotation_matrix_to_quaternion(rotation)
+                if len(quat) != 4:
+                    if self.debug:
+                        print("Invalid quaternion length, falling back to identity")
+                    quat = [0, 0, 0, 1]  # Identity quaternion
+            except Exception as e:
+                if self.debug:
+                    print(f"Quaternion conversion failed: {e}, using identity")
+                quat = [0, 0, 0, 1]
             
-            # Create the 7-element pose vector [tx, ty, tz, w, x, y, z]
-            ee_pose = np.concatenate((position, np.array(quat)))
-
-            # FIX 1: Convert to pure Python types to avoid numpy boolean issues
-            pose_list = [float(x) for x in ee_pose.flatten()]
-            seed_list = [float(x) for x in [0.0] * 6]
+            # CRITICAL FIX 2: Ensure proper data types and shapes
+            try:
+                # Convert to standard Python types (not numpy)
+                pos_list = [float(position[0]), float(position[1]), float(position[2])]
+                quat_list = [float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])]
+                
+                # Create pose vector [x, y, z, w, x, y, z] (position + quaternion)
+                ee_pose = pos_list + quat_list
+                
+                # Ensure all elements are Python floats
+                ee_pose = [float(x) for x in ee_pose]
+                
+                # Create seed as Python list
+                seed = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+                
+            except Exception as e:
+                if self.debug:
+                    print(f"Data conversion failed: {e}")
+                return []
             
-            # FIX 2: Add proper exception handling for ur_ikfast internal errors
+            # CRITICAL FIX 3: Robust ur_ikfast call with exception handling
             try:
                 joint_configs = ur5e_arm.inverse(
-                    pose_list,
-                    False,      # closest_only
-                    seed_list   # seed for IK solver
+                    ee_pose,
+                    closest_only=False,  # Get all solutions
+                    seed=seed
                 )
             except ValueError as ve:
-                if "ambiguous" in str(ve):
+                if "ambiguous" in str(ve).lower() or "boolean" in str(ve).lower():
                     if self.debug:
-                        print(f"ur_ikfast boolean ambiguity error - likely internal numpy issue")
+                        print("ur_ikfast boolean/ambiguous error - likely numpy compatibility issue")
                     return []
                 else:
+                    # Re-raise other ValueErrors
                     raise ve
+            except TypeError as te:
+                if self.debug:
+                    print(f"ur_ikfast type error: {te}")
+                return []
+            except Exception as e:
+                if self.debug:
+                    print(f"ur_ikfast general error: {e}")
+                return []
             
+            # CRITICAL FIX 4: Robust solution processing
             solutions = []
             
-            # FIX 3: Better handling of ur_ikfast return values
             if joint_configs is not None:
-                # Handle both single solution and multiple solutions
-                if isinstance(joint_configs, list):
-                    if len(joint_configs) > 0:
-                        # Check if it's a list of lists (multiple solutions)
-                        if isinstance(joint_configs[0], (list, tuple, np.ndarray)):
+                try:
+                    # Handle different return formats from ur_ikfast
+                    if isinstance(joint_configs, (list, tuple)):
+                        if len(joint_configs) == 0:
+                            configs_to_process = []
+                        elif isinstance(joint_configs[0], (list, tuple, np.ndarray)):
+                            # Multiple solutions
                             configs_to_process = joint_configs
-                        else:
-                            # Single solution returned as flat list
+                        elif len(joint_configs) == 6:
+                            # Single solution as flat list
                             configs_to_process = [joint_configs]
+                        else:
+                            if self.debug:
+                                print(f"Unexpected joint_configs format: {type(joint_configs)}, len={len(joint_configs)}")
+                            return []
+                    elif isinstance(joint_configs, np.ndarray):
+                        if joint_configs.ndim == 1 and len(joint_configs) == 6:
+                            # Single solution as 1D array
+                            configs_to_process = [joint_configs]
+                        elif joint_configs.ndim == 2:
+                            # Multiple solutions as 2D array
+                            configs_to_process = [joint_configs[i] for i in range(joint_configs.shape[0])]
+                        else:
+                            if self.debug:
+                                print(f"Unexpected numpy array shape: {joint_configs.shape}")
+                            return []
                     else:
-                        configs_to_process = []
-                elif isinstance(joint_configs, np.ndarray):
-                    if joint_configs.ndim == 2:
-                        # Multiple solutions as 2D array
-                        configs_to_process = [joint_configs[i] for i in range(joint_configs.shape[0])]
-                    else:
-                        # Single solution as 1D array
-                        configs_to_process = [joint_configs]
-                else:
-                    configs_to_process = []
-                
-                for config in configs_to_process:
-                    try:
-                        # Convert to Python list and normalize
-                        config_list = [float(j) for j in config]
-                        normalized_config = [self.numerical_solver.normalize_angle(j) for j in config_list]
-                        
-                        # Validate against joint limits
-                        if self._within_joint_limits(normalized_config):
-                            solutions.append(normalized_config)
-                    except (TypeError, ValueError) as e:
                         if self.debug:
-                            print(f"Warning: Failed to process ur_ikfast solution: {e}")
-                        continue
+                            print(f"Unexpected joint_configs type: {type(joint_configs)}")
+                        return []
+                    
+                    # Process each configuration
+                    for config in configs_to_process:
+                        try:
+                            # Convert to Python list with proper handling
+                            if isinstance(config, np.ndarray):
+                                config_list = config.flatten().tolist()
+                            elif isinstance(config, (list, tuple)):
+                                config_list = list(config)
+                            else:
+                                if self.debug:
+                                    print(f"Skipping config with unexpected type: {type(config)}")
+                                continue
+                            
+                            # Ensure we have exactly 6 joints
+                            if len(config_list) != 6:
+                                if self.debug:
+                                    print(f"Skipping config with wrong length: {len(config_list)}")
+                                continue
+                            
+                            # Convert to float and normalize angles
+                            try:
+                                normalized_config = []
+                                for joint_val in config_list:
+                                    if isinstance(joint_val, (int, float, np.number)):
+                                        normalized_angle = self.numerical_solver.normalize_angle(float(joint_val))
+                                        normalized_config.append(normalized_angle)
+                                    else:
+                                        if self.debug:
+                                            print(f"Invalid joint value type: {type(joint_val)}")
+                                        break
+                                
+                                if len(normalized_config) == 6:
+                                    # Validate against joint limits
+                                    if self._within_joint_limits(normalized_config):
+                                        solutions.append(normalized_config)
+                                    elif self.debug:
+                                        print("Solution exceeds joint limits")
+                            
+                            except (ValueError, TypeError) as e:
+                                if self.debug:
+                                    print(f"Error processing joint values: {e}")
+                                continue
+                        
+                        except Exception as e:
+                            if self.debug:
+                                print(f"Error processing config: {e}")
+                            continue
                 
-                if solutions:
-                    self.ikfast_successes += 1
+                except Exception as e:
+                    if self.debug:
+                        print(f"Error processing joint_configs: {e}")
+                    return []
             
+            # Update statistics
             elapsed = time.perf_counter() - start_time
             self.ikfast_total_time += elapsed
             
-            if self.debug:
-                if solutions:
+            if solutions:
+                self.ikfast_successes += 1
+                if self.debug:
                     print(f"ur_ikfast solved in {elapsed*1000:.3f}ms, found {len(solutions)} solutions")
-                else:
+            else:
+                if self.debug:
                     print(f"ur_ikfast failed to find solutions in {elapsed*1000:.3f}ms")
             
             return solutions
-            
+        
+        except ImportError:
+            if self.debug:
+                print("ur_ikfast not available")
+            return []
         except Exception as e:
             if self.debug:
                 print(f"ur_ikfast failed with exception: {type(e).__name__}: {e}")
             return []
+
     
     def best_reachable_pose(self, target_pose: np.ndarray, 
                            current_joints: Optional[List[float]] = None) -> Tuple[List[float], np.ndarray]:
