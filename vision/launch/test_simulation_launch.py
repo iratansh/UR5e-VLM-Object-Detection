@@ -36,7 +36,7 @@ def generate_launch_description():
     
     test_world_file = DeclareLaunchArgument(
         'test_world_file',
-        default_value='ur5e_vision_test_world.world',
+        default_value='ur5e_vision_world.world',
         description='Gazebo world file for testing'
     )
     
@@ -69,9 +69,14 @@ def generate_launch_description():
     pkg_ur_description = FindPackageShare('ur_description')
     pkg_ur_moveit_config = FindPackageShare('ur_moveit_config')
     
-    # Robot description
+    # World file path
+    world_file_path = PathJoinSubstitution([
+        os.path.dirname(__file__), '..', 'worlds', 'ur5e_vision_world.world'
+    ])
+    
+    # Robot description - Use custom UR5e with RealSense camera
     robot_description_content = PathJoinSubstitution([
-        pkg_ur_description, 'urdf', 'ur.urdf.xacro'
+        FindPackageShare('ur5e_project'), 'urdf', 'ur5e_with_realsense.urdf.xacro'
     ])
     
     robot_description = {'robot_description': robot_description_content}
@@ -82,7 +87,7 @@ def generate_launch_description():
             PathJoinSubstitution([pkg_gazebo_ros, 'launch', 'gazebo.launch.py'])
         ]),
         launch_arguments={
-            'world': LaunchConfiguration('test_world_file'),
+            'world': world_file_path,
             'verbose': 'false',
             'pause': 'false',
             'use_sim_time': LaunchConfiguration('use_sim_time')

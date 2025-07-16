@@ -163,14 +163,6 @@ class DepthAwareDetector:
             f" (filters: {self.use_filters})"
         )
 
-    def _setup_realsense(self):
-        """DEPRECATED: RealSense pipeline is managed externally by UnifiedVisionSystem.
-        This class now receives calibration parameters and frames directly.
-        """
-        self.logger.warning("_setup_realsense is deprecated and should not be called.")
-        # Original content commented out or removed as pipeline is external
-        pass
-
     def _setup_stereo_camera(self):
         """DEPRECATED or needs rework if stereo is used without internal pipeline management.
         Set up stereo camera system.
@@ -195,39 +187,6 @@ class DepthAwareDetector:
         self.stereo_matcher = cv2.StereoBM_create(numDisparities=16 * 5, blockSize=21)
 
         self.logger.info("📷 Stereo camera system initialized")
-
-    def get_frames(self) -> Tuple[np.ndarray, np.ndarray]:
-        """DEPRECATED: Frames are now passed directly to processing methods like augment_vlm_detections_3d.
-        Get synchronized color and depth frames.
-        
-        Returns
-        -------
-        Tuple[np.ndarray, np.ndarray]
-            Color and depth frames as numpy arrays
-            
-        Notes
-        -----
-        For RealSense, uses hardware synchronization
-        For stereo, performs software synchronization
-        """
-        self.logger.warning("get_frames is deprecated. Frames should be passed to processing methods.")
-        raise NotImplementedError("get_frames is deprecated and should not be used.")
-
-    def _get_realsense_frames(self) -> Tuple[np.ndarray, np.ndarray]:
-        """DEPRECATED.
-        Get frames from RealSense camera.
-        
-        Returns
-        -------
-        Tuple[np.ndarray, np.ndarray]
-            Color and filtered depth frames
-            
-        Notes
-        -----
-        Applies temporal, spatial, and hole-filling filters to depth
-        """
-        self.logger.warning("_get_realsense_frames is deprecated.")
-        raise NotImplementedError("_get_realsense_frames is deprecated and should not be used.")
 
     def _get_stereo_frames(self) -> Tuple[np.ndarray, np.ndarray]:
         """DEPRECATED.

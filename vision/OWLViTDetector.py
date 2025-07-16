@@ -15,15 +15,10 @@ using natural language descriptions like "a red cup" or "a blue box".
 import cv2
 import torch
 import numpy as np
-import time
 import logging
 from typing import List, Tuple, Optional, Dict, Any
 from PIL import Image
-import speech_recognition as sr
 import threading
-import queue
-from CameraCalibration import CameraCalibration
-from WorkSpaceValidator import WorkspaceValidator
 from transformers import OwlViTProcessor, OwlViTForObjectDetection
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

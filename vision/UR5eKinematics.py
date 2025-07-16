@@ -218,7 +218,7 @@ class HybridUR5eKinematics:
             try:
                 joint_configs = ur5e_arm.inverse(
                     ee_pose,
-                    closest_only=False,  # Get all solutions
+                    all_solutions=False,  # Get all solutions
                     seed=seed
                 )
             except ValueError as ve:

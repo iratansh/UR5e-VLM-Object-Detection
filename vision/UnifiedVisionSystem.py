@@ -26,7 +26,7 @@ import time
 import numpy as np
 import logging
 from typing import List, Tuple, Optional, Dict, Any, Union
-# Component Imports
+
 from SpeechCommandProcessor import SpeechCommandProcessor
 from OWLViTDetector import OWLViTDetector
 from DepthAwareDetector import DepthAwareDetector, Detection3D
