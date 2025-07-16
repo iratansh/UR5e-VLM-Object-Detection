@@ -167,7 +167,7 @@ class HybridUR5eKinematics:
 
     def _solve_with_ikfast(self, target_pose: np.ndarray) -> List[List[float]]:
         """
-        FIXED: Solve IK using ur_ikfast with robust error handling.
+        FIXED: Solve IK using ur_ikfast with correct parameter names and format.
         """
         if not self.ikfast_available:
             return []
@@ -176,50 +176,58 @@ class HybridUR5eKinematics:
         self.ikfast_attempts += 1
         
         try:
-            from ur_ikfast.ur_kinematics import URKinematics
-            ur5e_arm = URKinematics('ur5e')
+            # Import the URKinematics class directly from ur_ikfast
+            import ur_ikfast
+            
+            # Create kinematics instance for UR5e
+            ur5e_kinematics = ur_ikfast.URKinematics('ur5e')
             
             position = target_pose[:3, 3]
             rotation = target_pose[:3, :3]
             
-            # CRITICAL FIX 1: Robust quaternion conversion
+            # CRITICAL FIX 1: Convert rotation matrix to pose format expected by ur_ikfast
+            # ur_ikfast expects [x, y, z, qx, qy, qz, qw] format
             try:
-                quat = self._rotation_matrix_to_quaternion(rotation)
-                if len(quat) != 4:
+                # Convert rotation matrix to quaternion using the method from the provided URKinematics
+                quat_wxyz = self._rotation_matrix_to_quaternion(rotation)
+                # ur_ikfast expects [qx, qy, qz, qw] but we have [qw, qx, qy, qz]
+                quat_xyzw = [quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]]
+                
+                if len(quat_xyzw) != 4:
                     if self.debug:
                         print("Invalid quaternion length, falling back to identity")
-                    quat = [0, 0, 0, 1]  # Identity quaternion
+                    quat_xyzw = [0, 0, 0, 1]  # Identity quaternion [qx, qy, qz, qw]
             except Exception as e:
                 if self.debug:
                     print(f"Quaternion conversion failed: {e}, using identity")
-                quat = [0, 0, 0, 1]
+                quat_xyzw = [0, 0, 0, 1]
             
-            # CRITICAL FIX 2: Ensure proper data types and shapes
+            # CRITICAL FIX 2: Create pose in the format expected by ur_ikfast
             try:
                 # Convert to standard Python types (not numpy)
                 pos_list = [float(position[0]), float(position[1]), float(position[2])]
-                quat_list = [float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])]
+                quat_list = [float(quat_xyzw[0]), float(quat_xyzw[1]), float(quat_xyzw[2]), float(quat_xyzw[3])]
                 
-                # Create pose vector [x, y, z, w, x, y, z] (position + quaternion)
+                # Create pose vector [x, y, z, qx, qy, qz, qw] 
                 ee_pose = pos_list + quat_list
                 
                 # Ensure all elements are Python floats
                 ee_pose = [float(x) for x in ee_pose]
                 
-                # Create seed as Python list
-                seed = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+                # Create initial guess as Python list (FIXED: use q_guess parameter name)
+                q_guess = [0.0, -1.5708, 0.0, 0.0, 0.0, 0.0]  # Default UR pose
                 
             except Exception as e:
                 if self.debug:
                     print(f"Data conversion failed: {e}")
                 return []
             
-            # CRITICAL FIX 3: Robust ur_ikfast call with exception handling
+            # CRITICAL FIX 3: Use correct parameter name 'q_guess' instead of 'seed'
             try:
-                joint_configs = ur5e_arm.inverse(
+                joint_configs = ur5e_kinematics.inverse(
                     ee_pose,
-                    all_solutions=False,  # Get all solutions
-                    seed=seed
+                    all_solutions=True,  # Get all solutions
+                    q_guess=q_guess     # FIXED: use q_guess instead of seed
                 )
             except ValueError as ve:
                 if "ambiguous" in str(ve).lower() or "boolean" in str(ve).lower():
@@ -238,13 +246,24 @@ class HybridUR5eKinematics:
                     print(f"ur_ikfast general error: {e}")
                 return []
             
-            # CRITICAL FIX 4: Robust solution processing
+            # CRITICAL FIX 4: Process solutions correctly
             solutions = []
             
             if joint_configs is not None:
                 try:
                     # Handle different return formats from ur_ikfast
-                    if isinstance(joint_configs, (list, tuple)):
+                    if isinstance(joint_configs, np.ndarray):
+                        if joint_configs.ndim == 1 and len(joint_configs) == 6:
+                            # Single solution as 1D array
+                            configs_to_process = [joint_configs]
+                        elif joint_configs.ndim == 2:
+                            # Multiple solutions as 2D array
+                            configs_to_process = [joint_configs[i] for i in range(joint_configs.shape[0])]
+                        else:
+                            if self.debug:
+                                print(f"Unexpected numpy array shape: {joint_configs.shape}")
+                            return []
+                    elif isinstance(joint_configs, (list, tuple)):
                         if len(joint_configs) == 0:
                             configs_to_process = []
                         elif isinstance(joint_configs[0], (list, tuple, np.ndarray)):
@@ -256,17 +275,6 @@ class HybridUR5eKinematics:
                         else:
                             if self.debug:
                                 print(f"Unexpected joint_configs format: {type(joint_configs)}, len={len(joint_configs)}")
-                            return []
-                    elif isinstance(joint_configs, np.ndarray):
-                        if joint_configs.ndim == 1 and len(joint_configs) == 6:
-                            # Single solution as 1D array
-                            configs_to_process = [joint_configs]
-                        elif joint_configs.ndim == 2:
-                            # Multiple solutions as 2D array
-                            configs_to_process = [joint_configs[i] for i in range(joint_configs.shape[0])]
-                        else:
-                            if self.debug:
-                                print(f"Unexpected numpy array shape: {joint_configs.shape}")
                             return []
                     else:
                         if self.debug:
@@ -577,7 +585,7 @@ class HybridUR5eKinematics:
     
     def _rotation_matrix_to_quaternion(self, rotation_matrix: np.ndarray) -> List[float]:
         """
-        Convert rotation matrix to quaternion (w, x, y, z) using scipy.
+        Convert rotation matrix to quaternion (w, x, y, z) with robust handling.
         
         Args:
             rotation_matrix: 3x3 rotation matrix
@@ -585,29 +593,64 @@ class HybridUR5eKinematics:
         Returns:
             Quaternion as [w, x, y, z]
         """
-        # Use scipy if available, otherwise fall back to manual calculation
+        # First, validate the rotation matrix
+        try:
+            R = np.array(rotation_matrix, dtype=np.float64)
+            
+            # Ensure it's 3x3
+            if R.shape != (3, 3):
+                if self.debug:
+                    print(f"Invalid rotation matrix shape: {R.shape}, using identity")
+                return [1.0, 0.0, 0.0, 0.0]
+            
+            # Check if it's a proper rotation matrix
+            det = np.linalg.det(R)
+            if not np.isclose(det, 1.0, atol=1e-6):
+                if self.debug:
+                    print(f"Invalid rotation matrix determinant: {det}, using identity")
+                return [1.0, 0.0, 0.0, 0.0]
+            
+            # Check orthogonality
+            should_be_identity = R @ R.T
+            identity = np.eye(3)
+            if not np.allclose(should_be_identity, identity, atol=1e-6):
+                if self.debug:
+                    print("Non-orthogonal rotation matrix, using identity")
+                return [1.0, 0.0, 0.0, 0.0]
+            
+        except Exception as e:
+            if self.debug:
+                print(f"Error validating rotation matrix: {e}, using identity")
+            return [1.0, 0.0, 0.0, 0.0]
+        
+        # Use scipy if available for robust conversion
         if SCIPY_AVAILABLE and R is not None:
             try:
-                # Use scipy for robust rotation matrix to quaternion conversion
                 rotation_obj = R.from_matrix(rotation_matrix)
                 # Get quaternion in [x, y, z, w] format from scipy
                 quat_xyzw = rotation_obj.as_quat()
-                # Convert to [w, x, y, z] format expected by ur_ikfast
-                quat_wxyz = [quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]]
+                # Convert to [w, x, y, z] format
+                quat_wxyz = [float(quat_xyzw[3]), float(quat_xyzw[0]), float(quat_xyzw[1]), float(quat_xyzw[2])]
+                
+                # Validate quaternion
+                norm = np.linalg.norm(quat_wxyz)
+                if not np.isclose(norm, 1.0, atol=1e-6):
+                    if self.debug:
+                        print(f"Invalid quaternion norm: {norm}, normalizing")
+                    quat_wxyz = [q / norm for q in quat_wxyz]
+                
                 return quat_wxyz
                 
             except Exception as e:
                 if self.debug:
-                    print(f"Warning: Scipy quaternion conversion failed: {e}")
-                    print("Falling back to manual calculation")
+                    print(f"Scipy quaternion conversion failed: {e}, using manual method")
         
-        # Manual calculation (either scipy unavailable or failed)
-        if self.debug and not SCIPY_AVAILABLE:
-            print("Using manual quaternion calculation (scipy not available)")
-            
-            # Fallback to manual calculation if scipy fails
+        # Manual calculation using Shepperd's method (more numerically stable)
+        try:
             R_mat = rotation_matrix
-            trace = np.trace(R_mat)
+            
+            # Shepperd's method for robust quaternion extraction
+            trace = R_mat[0, 0] + R_mat[1, 1] + R_mat[2, 2]
             
             if trace > 0:
                 s = np.sqrt(trace + 1.0) * 2  # s = 4 * qw
@@ -634,7 +677,27 @@ class HybridUR5eKinematics:
                 qy = (R_mat[1, 2] + R_mat[2, 1]) / s
                 qz = 0.25 * s
             
-            return [qw, qx, qy, qz]
+            # Normalize the quaternion
+            quat = [qw, qx, qy, qz]
+            norm = np.sqrt(sum(q*q for q in quat))
+            
+            if norm < 1e-8:
+                if self.debug:
+                    print("Quaternion norm too small, using identity")
+                return [1.0, 0.0, 0.0, 0.0]
+            
+            quat_normalized = [float(q / norm) for q in quat]
+            
+            # Ensure w component is positive (avoid double cover issue)
+            if quat_normalized[0] < 0:
+                quat_normalized = [-q for q in quat_normalized]
+            
+            return quat_normalized
+            
+        except Exception as e:
+            if self.debug:
+                print(f"Manual quaternion calculation failed: {e}")
+            return [1.0, 0.0, 0.0, 0.0]  # Identity quaternion as fallback
     
     def _within_joint_limits(self, joint_angles: List[float]) -> bool:
         """Check if joint angles are within UR5e limits."""
