@@ -24,6 +24,10 @@ import json
 import math
 
 # Import your vision components
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from OWLViTDetector import OWLViTDetector
 from SpeechCommandProcessor import SpeechCommandProcessor
 from CameraCalibration import CameraCalibration
