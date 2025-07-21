@@ -12,15 +12,17 @@ from typing import List, Optional, Tuple, Dict, Any
 import logging
 import time
 
+import ur_ikfast.ur_kinematics
+
 # Try to import scipy, but don't fail if there are library issues
 try:
-    from scipy.spatial.transform import Rotation as R
+    from scipy.spatial.transform import Rotation
     SCIPY_AVAILABLE = True
 except ImportError as e:
     print(f"Scipy import failed: {e}")
     print("Falling back to manual quaternion calculations")
     SCIPY_AVAILABLE = False
-    R = None
+    Rotation = None
 
 # Try to import ur_ikfast for high-speed analytical IK
 try:
@@ -180,7 +182,7 @@ class HybridUR5eKinematics:
             import ur_ikfast
             
             # Create kinematics instance for UR5e
-            ur5e_kinematics = ur_ikfast.URKinematics('ur5e')
+            ur5e_kinematics = ur_ikfast.ur_kinematics.URKinematics('ur5e')
             
             position = target_pose[:3, 3]
             rotation = target_pose[:3, :3]
@@ -624,9 +626,9 @@ class HybridUR5eKinematics:
             return [1.0, 0.0, 0.0, 0.0]
         
         # Use scipy if available for robust conversion
-        if SCIPY_AVAILABLE and R is not None:
+        if SCIPY_AVAILABLE and Rotation is not None:
             try:
-                rotation_obj = R.from_matrix(rotation_matrix)
+                rotation_obj = Rotation.from_matrix(rotation_matrix)
                 # Get quaternion in [x, y, z, w] format from scipy
                 quat_xyzw = rotation_obj.as_quat()
                 # Convert to [w, x, y, z] format
@@ -776,13 +778,14 @@ class UR5eKinematics:
     """Simple UR5e robot kinematics implementation"""
     
     def __init__(self):
-        # UR5e DH parameters (standard)
-        self.d1 = 0.1625   # Base to shoulder
-        self.a2 = -0.425   # Upper arm length (negative in standard UR convention)
-        self.a3 = -0.3922  # Forearm length (negative in standard UR convention)
-        self.d4 = 0.1333   # Wrist 1 height
-        self.d5 = 0.0997   # Wrist 2 height
-        self.d6 = 0.0996   # End effector length
+        # UR5e DH parameters (standard DH convention)
+        # Based on official UR5e specifications from Universal Robots
+        self.d1 = 0.1625   # Base to shoulder (162.5mm)
+        self.a2 = -0.425   # Upper arm length (425mm) - NEGATIVE for standard DH
+        self.a3 = -0.3922  # Forearm length (392.2mm) - NEGATIVE for standard DH  
+        self.d4 = 0.1333   # Wrist 1 height (133.3mm)
+        self.d5 = 0.0997   # Wrist 2 height (99.7mm)
+        self.d6 = 0.0996   # End effector length (99.6mm)
         
         # Joint limits (radians)
         self.JOINT_LIMITS = [
@@ -805,7 +808,67 @@ class UR5eKinematics:
     
     def normalize_angle(self, angle: float) -> float:
         """Normalize angle to [-π, π]"""
-        return ((angle + math.pi) % (2*math.pi)) - math.pi
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+        return angle
+    
+    def _calculate_jacobian_fast(self, q: List[float]) -> np.ndarray:
+        """
+        Calculate Jacobian matrix using finite differences.
+        """
+        delta = 1e-6
+        J = np.zeros((6, 6))
+        
+        try:
+            current_pose = self.forward_kinematics(q)
+            current_pos = current_pose[:3, 3]
+            current_rot = current_pose[:3, :3]
+        except:
+            return np.eye(6)  # Return identity if FK fails
+        
+        for i in range(6):
+            q_delta = list(q)
+            q_delta[i] += delta
+            
+            try:
+                perturbed_pose = self.forward_kinematics(q_delta)
+                perturbed_pos = perturbed_pose[:3, 3]
+                perturbed_rot = perturbed_pose[:3, :3]
+                
+                # Position Jacobian
+                J[:3, i] = (perturbed_pos - current_pos) / delta
+                
+                # Orientation Jacobian
+                try:
+                    delta_R = current_rot.T @ perturbed_rot
+                    trace_val = np.trace(delta_R)
+                    
+                    if abs(trace_val - 3) < 1e-6:
+                        J[3:, i] = np.zeros(3)
+                    else:
+                        angle = math.acos(np.clip((trace_val - 1) / 2, -1.0, 1.0))
+                        if angle > 1e-6:
+                            axis = np.array([
+                                delta_R[2, 1] - delta_R[1, 2],
+                                delta_R[0, 2] - delta_R[2, 0],
+                                delta_R[1, 0] - delta_R[0, 1]
+                            ])
+                            axis_norm = np.linalg.norm(axis)
+                            if axis_norm > 1e-6:
+                                axis = axis / axis_norm * angle
+                                J[3:, i] = axis / delta
+                            else:
+                                J[3:, i] = np.zeros(3)
+                        else:
+                            J[3:, i] = np.zeros(3)
+                except:
+                    J[3:, i] = np.zeros(3)
+            except:
+                J[:, i] = np.zeros(6)
+        
+        return J
     
     def dh_transform(self, d: float, a: float, alpha: float, theta: float) -> np.ndarray:
         """Standard DH transformation matrix"""
@@ -833,10 +896,10 @@ class UR5eKinematics:
         """
         q1, q2, q3, q4, q5, q6 = joints
         
-        # Define DH parameters for UR5e
+        # Define DH parameters for UR5e (standard DH convention)
         dh_params = [
             (self.d1, 0, math.pi/2, q1),              # Base to shoulder
-            (0, self.a2, 0, q2),                       # Shoulder to elbow
+            (0, self.a2, 0, q2),                       # Shoulder to elbow  
             (0, self.a3, 0, q3),                       # Elbow to wrist1
             (self.d4, 0, math.pi/2, q4),               # Wrist1 to wrist2
             (self.d5, 0, -math.pi/2, q5),              # Wrist2 to wrist3
@@ -1122,62 +1185,6 @@ class UR5eKinematics:
         
         # If we got here, failed to converge
         return None
-    
-    def _calculate_jacobian_fast(self, q: List[float]) -> np.ndarray:
-        """
-        FAST: Optimized Jacobian calculation for speed
-        """
-        delta = 1.5e-6  # Slightly larger step for speed
-
-        J = np.zeros((6, 6))
-        
-        try:
-            current_pose = self.forward_kinematics(q)
-            current_pos = current_pose[:3, 3]
-            current_rot = current_pose[:3, :3]
-        except:
-            return np.eye(6)
-        
-        for i in range(6):
-            q_delta = list(q)
-            q_delta[i] += delta
-            
-            try:
-                perturbed_pose = self.forward_kinematics(q_delta)
-                perturbed_pos = perturbed_pose[:3, 3]
-                perturbed_rot = perturbed_pose[:3, :3]
-                
-                # Position Jacobian
-                J[:3, i] = (perturbed_pos - current_pos) / delta
-                
-                # Simplified orientation Jacobian for speed
-                try:
-                    delta_R = current_rot.T @ perturbed_rot
-                    trace_val = np.trace(delta_R)
-                    
-                    if abs(trace_val - 3) < 1e-6:
-                        J[3:, i] = np.zeros(3)
-                    else:
-                        angle = math.acos(np.clip((trace_val - 1) / 2, -1.0, 1.0))
-                        if angle > 1e-6:
-                            axis = np.array([
-                                delta_R[2, 1] - delta_R[1, 2],
-                                delta_R[0, 2] - delta_R[2, 0],
-                                delta_R[1, 0] - delta_R[0, 1]
-                            ])
-                            axis_norm = np.linalg.norm(axis)
-                            if axis_norm > 1e-6:
-                                J[3:, i] = (axis / axis_norm) * angle / delta
-                            else:
-                                J[3:, i] = np.zeros(3)
-                        else:
-                            J[3:, i] = np.zeros(3)
-                except:
-                    J[3:, i] = np.zeros(3)
-            except:
-                J[:, i] = np.zeros(6)
-        
-        return J
     
     def inverse_kinematics_improved(self, target_pose: np.ndarray, 
                               current_joints: Optional[List[float]] = None,

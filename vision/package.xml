@@ -4,7 +4,7 @@
   <name>unified_vision_system</name>
   <version>1.0.0</version>
   <description>Unified Vision System for UR5e with Robotiq gripper</description>
-  <maintainer email="your_email@example.com">Your Name</maintainer>
+  <maintainer email="iratansh@ualberta.ca">Ishaan Ratanshi</maintainer>
   <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
