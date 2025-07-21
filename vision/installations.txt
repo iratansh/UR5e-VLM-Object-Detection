@@ -1,0 +1,33 @@
+# Quick Start Guide for Simulation
+
+## 1. Install Dependencies
+
+```bash
+# Install Gazebo packages
+sudo apt update
+sudo apt install -y \
+  ros-humble-gazebo-ros-pkgs \
+  ros-humble-ros2-control \
+  ros-humble-ros2-controllers \
+  ros-humble-gazebo-ros2-control \
+  ros-humble-controller-manager \
+  ros-humble-joint-trajectory-controller \
+  ros-humble-joint-state-broadcaster
+
+# Install UR and MoveIt packages
+sudo apt install -y \
+  ros-humble-ur \
+  ros-humble-ur-description \
+  ros-humble-ur-moveit-config \
+  ros-humble-moveit \
+  ros-humble-moveit-ros-planning \
+  ros-humble-moveit-ros-visualization
+
+# Python dependencies
+pip3 install \
+  opencv-python \
+  pyrealsense2 \
+  SpeechRecognition \
+  pyaudio \
+  transformers \
+  torch

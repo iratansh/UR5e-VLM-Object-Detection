@@ -202,12 +202,9 @@ class UnifiedVisionSimulationTest(Node):
         try:
             self.logger.info("🌍 Launching Gazebo simulation...")
             
-            # Launch Gazebo with our test world
+            # Launch Gazebo with our test world using the existing working launch file
             gazebo_cmd = [
-                'ros2', 'launch', 'ur5e_vision', 'ur5e_gazebo_vision.launch.py',
-                'enable_vision_system:=false',  # We'll start this separately
-                'enable_rviz:=false',  # We'll start this separately
-                'world_file:=ur5e_vision_test_world.world'
+                'ros2', 'launch', 'vision', 'launch_gazebo_with_red_cube.py'
             ]
             
             gazebo_process = subprocess.Popen(
@@ -818,11 +815,6 @@ def main():
     print("="*60)
     
     try:
-        # Create test files
-        print("📁 Creating test configuration files...")
-        create_test_world_file()
-        create_rviz_config()
-        
         # Initialize ROS2
         rclpy.init()
         
