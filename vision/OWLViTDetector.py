@@ -66,12 +66,54 @@ class OWLViTDetector:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
         
+        # Construction tool knowledge base with professional terminology
+        self.construction_tools = {
+            # Hammers
+            "hammer": ["framing hammer", "claw hammer", "ball-peen hammer", "finish hammer", "sledgehammer"],
+            "framing hammer": ["framing hammer", "16 oz framing hammer", "straight claw hammer"],
+            "claw hammer": ["claw hammer", "curved claw hammer", "finish hammer"],
+            "ball-peen hammer": ["ball-peen hammer", "ball peen hammer", "machinist hammer"],
+            "finish hammer": ["finish hammer", "finishing hammer", "smooth face hammer"],
+            
+            # Screwdrivers  
+            "screwdriver": ["Phillips head screwdriver", "flathead screwdriver", "Robertson screwdriver"],
+            "phillips screwdriver": ["Phillips head screwdriver", "Phillips #2 screwdriver", "cross head screwdriver"],
+            "flathead screwdriver": ["flathead screwdriver", "slotted screwdriver", "straight screwdriver"],
+            
+            # Wrenches
+            "wrench": ["adjustable wrench", "box end wrench", "open end wrench", "combination wrench"],
+            "adjustable wrench": ["adjustable wrench", "crescent wrench", "adjustable spanner"],
+            "box wrench": ["box end wrench", "closed end wrench", "ring wrench"],
+            "combination wrench": ["combination wrench", "combo wrench", "open box wrench"],
+            
+            # Power tools
+            "drill": ["cordless drill", "power drill", "drill driver", "impact driver"],
+            "circular saw": ["circular saw", "skill saw", "buzz saw", "worm drive saw"],
+            "angle grinder": ["angle grinder", "disc grinder", "cut-off tool"],
+            
+            # Measuring tools
+            "tape measure": ["tape measure", "measuring tape", "construction tape"],
+            "level": ["spirit level", "bubble level", "construction level", "torpedo level"],
+            "square": ["framing square", "speed square", "combination square"],
+            
+            # Fasteners and hardware
+            "screw": ["wood screw", "drywall screw", "machine screw", "self-tapping screw"],
+            "nail": ["framing nail", "finish nail", "roofing nail", "concrete nail"],
+            "bolt": ["hex bolt", "carriage bolt", "anchor bolt", "machine bolt"],
+            "nut": ["hex nut", "lock nut", "wing nut", "coupling nut"],
+            
+            # Construction materials
+            "lumber": ["2x4", "plywood", "OSB", "dimensional lumber", "framing lumber"],
+            "pipe": ["PVC pipe", "copper pipe", "steel pipe", "conduit"],
+            "wire": ["electrical wire", "romex cable", "THHN wire", "coaxial cable"],
+        }
+        
         try:
             self.processor = OwlViTProcessor.from_pretrained(model_name)
             self.model = OwlViTForObjectDetection.from_pretrained(model_name)
             self.model.to(self.device)
             
-            self.logger.info(f"✅ OWL-ViT model loaded on {device}")
+            self.logger.info(f"✅ OWL-ViT model loaded for construction tool detection on {device}")
             
         except Exception as e:
             self.logger.error(f"Failed to load OWL-ViT model: {e}")
@@ -306,6 +348,154 @@ class OWLViTDetector:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
         
         return vis_image
+        
+    def get_construction_tool_queries(self, tool_name: str) -> List[str]:
+        """
+        Generate professional construction tool queries for improved detection.
+        
+        Parameters
+        ----------
+        tool_name : str
+            Generic or specific tool name (e.g., "hammer", "screwdriver")
+            
+        Returns
+        -------
+        List[str]
+            List of professional construction tool queries for detection
+            
+        Examples
+        --------
+        >>> get_construction_tool_queries("hammer")
+        ['framing hammer', 'claw hammer', 'ball-peen hammer', 'finish hammer', 'sledgehammer']
+        
+        Notes
+        -----
+        Uses construction trade terminology to improve detection accuracy.
+        Expands generic terms to specific professional tool names used in construction.
+        """
+        tool_name_lower = tool_name.lower().strip()
+        
+        # Direct lookup
+        if tool_name_lower in self.construction_tools:
+            return self.construction_tools[tool_name_lower]
+        
+        # Fuzzy matching for partial names
+        for key, queries in self.construction_tools.items():
+            if tool_name_lower in key or any(tool_name_lower in q.lower() for q in queries):
+                return queries
+        
+        # Fallback to original name if not found
+        return [tool_name]
+
+    def detect_construction_tools(self, image: np.ndarray, tool_names: List[str], 
+                                confidence_threshold: float = None) -> List[Dict]:
+        """
+        Detect construction tools with professional terminology enhancement.
+        
+        Parameters
+        ----------
+        image : np.ndarray
+            RGB image as numpy array
+        tool_names : List[str]
+            List of construction tool names to detect (e.g., ["hammer", "screwdriver"])
+        confidence_threshold : float, optional
+            Detection confidence threshold override
+            
+        Returns
+        -------
+        List[Dict]
+            List of detections with construction-specific metadata:
+            - label: Professional tool name
+            - confidence: Detection confidence (0-1)
+            - bbox: Bounding box [x1, y1, x2, y2]
+            - category: Tool category (e.g., "hammer", "measuring_tool")
+            - trade_term: Professional construction terminology
+            
+        Notes
+        -----
+        This method:
+        1. Expands generic tool names to professional variants
+        2. Uses construction trade terminology for better detection
+        3. Adds tool categorization for workflow understanding
+        4. Provides confidence-based filtering optimized for construction sites
+        """
+        if confidence_threshold is None:
+            confidence_threshold = self.confidence_threshold
+            
+        # Generate professional construction queries
+        all_queries = []
+        tool_mapping = {}  # Maps query to original tool name
+        
+        for tool_name in tool_names:
+            professional_queries = self.get_construction_tool_queries(tool_name)
+            for query in professional_queries:
+                all_queries.append(query)
+                tool_mapping[query] = tool_name
+        
+        # Remove duplicates while preserving order
+        unique_queries = list(dict.fromkeys(all_queries))
+        
+        self.logger.info(f"🔨 Detecting construction tools: {unique_queries}")
+        
+        # Run detection with professional terminology
+        detections = self.detect_with_text_queries(
+            image, unique_queries, confidence_threshold
+        )
+        
+        # Enhance results with construction metadata
+        enhanced_detections = []
+        for query, conf, bbox in detections:
+            original_tool = tool_mapping.get(query, query)
+            
+            # Determine tool category
+            category = self._get_tool_category(original_tool)
+            
+            enhanced_detection = {
+                'label': query,  # Professional term
+                'confidence': conf,
+                'bbox': bbox,
+                'category': category,
+                'trade_term': query,
+                'generic_name': original_tool
+            }
+            enhanced_detections.append(enhanced_detection)
+        
+        return enhanced_detections
+    
+    def _get_tool_category(self, tool_name: str) -> str:
+        """
+        Categorize construction tools for workflow understanding.
+        
+        Parameters
+        ----------
+        tool_name : str
+            Tool name to categorize
+            
+        Returns
+        -------
+        str
+            Tool category for construction workflow context
+        """
+        tool_lower = tool_name.lower()
+        
+        if any(h in tool_lower for h in ['hammer', 'mallet', 'sledge']):
+            return 'striking_tool'
+        elif any(s in tool_lower for s in ['screwdriver', 'phillips', 'flathead']):
+            return 'turning_tool'
+        elif any(w in tool_lower for w in ['wrench', 'spanner', 'socket']):
+            return 'gripping_tool'
+        elif any(d in tool_lower for d in ['drill', 'driver', 'impact']):
+            return 'power_tool'
+        elif any(m in tool_lower for m in ['measure', 'tape', 'level', 'square']):
+            return 'measuring_tool'
+        elif any(c in tool_lower for c in ['saw', 'cutter', 'grinder']):
+            return 'cutting_tool'
+        elif any(f in tool_lower for f in ['screw', 'nail', 'bolt', 'nut']):
+            return 'fastener'
+        elif any(m in tool_lower for m in ['lumber', 'pipe', 'wire', 'material']):
+            return 'construction_material'
+        else:
+            return 'general_tool'
 
     def get_bbox_center(self, bbox: List[int]) -> Tuple[int, int]:
         """

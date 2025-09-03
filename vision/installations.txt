@@ -23,11 +23,22 @@ sudo apt install -y \
   ros-humble-moveit-ros-planning \
   ros-humble-moveit-ros-visualization
 
-# Python dependencies
+# Python dependencies (updated for Whisper ASR, construction VLM, and TTS)
+# Note: Whisper requires ffmpeg to be installed and available on PATH
+# Ubuntu/Debian: sudo apt install -y ffmpeg
+# macOS (Homebrew): brew install ffmpeg
+
 pip3 install \
   opencv-python \
   pyrealsense2 \
-  SpeechRecognition \
-  pyaudio \
   transformers \
-  torch
+  torch \
+  sounddevice \
+  openai-whisper \
+  pyttsx3 \
+  sentence-transformers
+
+# Optional (research / performance):
+# pip3 install accelerate safetensors
+# Optional alternative TTS engine (future):
+# pip3 install TTS  # Coqui TTS

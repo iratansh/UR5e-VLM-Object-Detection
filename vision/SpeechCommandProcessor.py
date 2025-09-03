@@ -16,12 +16,16 @@ import queue
 import time
 from typing import List, Tuple, Optional, Dict
 import threading
-import speech_recognition as sr
 import numpy as np
 import re
 import spacy
 from transformers import pipeline
 import sys
+import whisper
+import sounddevice as sd
+import tempfile
+import wave
+import io
 
 logging.basicConfig(level=logging.INFO)
 
@@ -42,6 +46,8 @@ class SpeechCommandProcessor:
         Language for speech recognition, by default "en-US"
     timeout : float, optional
         Recognition timeout in seconds, by default 5.0
+    whisper_model : str, optional
+        Whisper model size to use, by default "base"
         
     Attributes
     ----------
@@ -57,10 +63,10 @@ class SpeechCommandProcessor:
         Language for speech recognition
     timeout : float
         Recognition timeout in seconds
-    recognizer : sr.Recognizer
-        Speech recognition object
-    microphone : sr.Microphone
-        Microphone object for speech input
+    whisper_model : whisper.Whisper
+        Whisper ASR model for speech recognition
+    sample_rate : int
+        Audio sample rate for recording (16kHz)
     command_queue : queue.Queue
         Queue for storing recognized commands
     listening : bool
@@ -71,12 +77,11 @@ class SpeechCommandProcessor:
         Dictionary of command patterns
     """
     
-    def __init__(self, model_name: str = "bert-base-uncased", use_gpu: bool = False, language: str = "en-US", timeout: float = 5.0):
+    def __init__(self, model_name: str = "bert-base-uncased", use_gpu: bool = False, language: str = "en-US", timeout: float = 5.0, whisper_model: str = "base"):
         self.logger = logging.getLogger(__name__)
         self.language = language
         self.timeout = timeout
-        self.recognizer = sr.Recognizer()
-        self.microphone = sr.Microphone()
+        self.sample_rate = 16000  # 16kHz for Whisper
         self.command_queue = queue.Queue()
         self.listening = False
         self.listen_thread = None
@@ -88,8 +93,14 @@ class SpeechCommandProcessor:
             'get': r'get\s+(?:the\s+)?(.+)'
         }
         
-        # Calibrate microphone
-        self._calibrate_noise()
+        # Load Whisper model
+        try:
+            self.logger.info(f"Loading Whisper {whisper_model} model...")
+            self.whisper_model = whisper.load_model(whisper_model)
+            self.logger.info("✅ Whisper model loaded successfully")
+        except Exception as e:
+            self.logger.error(f"Failed to load Whisper model: {e}")
+            raise
         
         try:
             # Try to load the spaCy model
@@ -119,21 +130,40 @@ class SpeechCommandProcessor:
         
         self.command_history = []
         
-    def _calibrate_noise(self):
+    def _record_audio(self, duration: float = None) -> np.ndarray:
         """
-        Calibrate microphone for ambient noise levels.
+        Record audio using sounddevice for Whisper processing.
         
+        Parameters
+        ----------
+        duration : float, optional
+            Recording duration in seconds, by default timeout value
+            
+        Returns
+        -------
+        np.ndarray
+            Audio data as numpy array
+            
         Notes
         -----
-        Uses energy threshold adjustment to filter background noise
+        Records at 16kHz sample rate optimized for Whisper ASR
         """
+        if duration is None:
+            duration = self.timeout
+        
         try:
-            with self.microphone as source:
-                self.logger.info("Calibrating for ambient noise...")
-                self.recognizer.adjust_for_ambient_noise(source, duration=1)
-                self.logger.info("✅ Noise calibration complete")
+            self.logger.info("🎤 Recording audio...")
+            audio_data = sd.rec(
+                int(duration * self.sample_rate),
+                samplerate=self.sample_rate,
+                channels=1,
+                dtype=np.float32
+            )
+            sd.wait()  # Wait for recording to finish
+            return audio_data.flatten()
         except Exception as e:
-            self.logger.error(f"Failed to calibrate noise: {e}")
+            self.logger.error(f"Audio recording failed: {e}")
+            return np.array([])
     
     def start_listening(self):
         """
@@ -159,26 +189,33 @@ class SpeechCommandProcessor:
         self.logger.info("Stopped listening")
     
     def _listen_loop(self):
-        """Background listening loop"""
+        """Background listening loop using Whisper ASR"""
         while self.listening:
             try:
-                with self.microphone as source:
-                    # Listen for audio with timeout
-                    self.audio = self.recognizer.listen(source, timeout=self.timeout)
-                    self.logger.info("Listening for commands...")
+                # Record audio
+                audio_data = self._record_audio()
                 
-                # Recognize speech
-                try:
-                    command = self.recognizer.recognize_google(self.audio, language=self.language)
-                    self.logger.info(f"Recognized command: {command}")
-                    self.command_queue.put(command.lower())
-                except sr.UnknownValueError:
-                    self.logger.warning("Could not understand audio")
-                except sr.RequestError as e:
-                    self.logger.error(f"Recognition service error: {e}")
+                if len(audio_data) > 0:
+                    # Transcribe with Whisper
+                    try:
+                        result = self.whisper_model.transcribe(
+                            audio_data,
+                            language=self.language.split('-')[0] if '-' in self.language else self.language,
+                            fp16=False  # Use FP32 for compatibility
+                        )
+                        
+                        command = result['text'].strip()
+                        if command:
+                            self.logger.info(f"🗣️ Whisper recognized: {command}")
+                            self.command_queue.put(command.lower())
+                        else:
+                            self.logger.debug("No speech detected")
+                            
+                    except Exception as e:
+                        self.logger.error(f"Whisper transcription error: {e}")
+                else:
+                    self.logger.debug("No audio recorded")
                     
-            except sr.WaitTimeoutError:
-                pass 
             except Exception as e:
                 self.logger.error(f"Listening error: {e}")
                 time.sleep(0.1)
@@ -194,7 +231,7 @@ class SpeechCommandProcessor:
             
         Notes
         -----
-        Uses Google Speech Recognition API for transcription
+        Uses Whisper ASR for robust speech transcription, optimized for construction site environments
         """
         try:
             return self.command_queue.get_nowait()
@@ -410,15 +447,15 @@ class SpeechCommandProcessor:
         Clean up resources used by the speech processor.
         
         This method ensures proper cleanup of all resources,
-        including stopping the listening thread.
+        including stopping the listening thread and releasing Whisper model.
         """
         self.stop_listening()
         
-        # Release microphone resources if needed
-        if hasattr(self, 'microphone') and hasattr(self.microphone, 'close'):
+        # Clear Whisper model from memory if needed
+        if hasattr(self, 'whisper_model'):
             try:
-                self.microphone.close()
+                del self.whisper_model
             except Exception as e:
-                logging.error(f"Error closing microphone: {e}")
+                logging.error(f"Error cleaning up Whisper model: {e}")
         
         logging.info("Speech command processor cleaned up")
