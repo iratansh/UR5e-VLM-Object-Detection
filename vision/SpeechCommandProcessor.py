@@ -102,11 +102,23 @@ class SpeechCommandProcessor:
             self.logger.error(f"Failed to load Whisper model: {e}")
             raise
         
+        # Initialize Rasa NLP for construction-specific intent recognition
+        try:
+            from ConstructionRasaNLP import ConstructionRasaNLP
+            self.rasa_nlp = ConstructionRasaNLP(
+                confidence_threshold=0.6
+            )
+            self.logger.info("✅ Rasa NLP initialized for construction commands")
+        except ImportError as e:
+            self.logger.warning(f"Rasa NLP not available: {e}")
+            self.rasa_nlp = None
+        
+        # Fallback to spaCy + transformers if Rasa fails
         try:
             # Try to load the spaCy model
             try:
                 self.nlp = spacy.load("en_core_web_sm")
-                self.logger.info("Loaded spaCy model: en_core_web_sm")
+                self.logger.info("Loaded spaCy model: en_core_web_sm as fallback")
             except OSError:
                 # If model not found, try to download it
                 self.logger.warning("spaCy model not found. Attempting to download...")
@@ -117,7 +129,7 @@ class SpeechCommandProcessor:
             
             try:
                 self.intent_classifier = pipeline("text-classification", model=model_name, use_gpu=use_gpu)
-                self.logger.info(f"Loaded intent classifier: {model_name}")
+                self.logger.info(f"Loaded intent classifier: {model_name} as fallback")
             except Exception as e:
                 self.logger.warning(f"Could not load intent classifier: {e}")
                 self.intent_classifier = None
@@ -240,7 +252,7 @@ class SpeechCommandProcessor:
     
     def parse_object_query(self, command: str) -> List[str]:
         """
-        Extract object queries from command text.
+        Extract object queries from command text using Rasa NLP.
         
         Parameters
         ----------
@@ -254,13 +266,25 @@ class SpeechCommandProcessor:
             
         Examples
         --------
-        >>> parse_object_query("pick up the water bottle")
-        ['water bottle']
+        >>> parse_object_query("pick up the framing hammer")
+        ['framing hammer']
         """
         if not command:
             return []
-            
+        
         queries = []
+        
+        # Primary: Use Rasa NLP for tool extraction
+        if self.rasa_nlp:
+            try:
+                tool_references = self.rasa_nlp.extract_tool_references(command)
+                if tool_references:
+                    queries.extend(tool_references)
+                    return queries
+            except Exception as e:
+                self.logger.error(f"Rasa tool extraction failed: {e}")
+        
+        # Fallback: Use original pattern matching
         for pattern in self.command_patterns.values():
             match = re.search(pattern, command)
             if match:
@@ -272,7 +296,7 @@ class SpeechCommandProcessor:
 
     def process_command(self, command: str) -> Optional[Dict]:
         """
-        Process a natural language command.
+        Process a natural language command using Rasa NLP.
         
         Parameters
         ----------
@@ -283,50 +307,111 @@ class SpeechCommandProcessor:
         -------
         Optional[Dict]
             Dictionary containing:
-            - intent: Command intent (e.g., "pick", "move")
+            - intent: Command intent (e.g., "pickup_tool", "find_tool")
             - target: Target object or location
             - parameters: Additional command parameters
+            - entities: Extracted entities with metadata
+            - confidence: Intent confidence score
             Or None if command cannot be processed
             
         Notes
         -----
         Processing steps:
-        1. Tokenize and parse command
-        2. Classify command intent
-        3. Extract target and parameters
+        1. Use Rasa NLP for construction-specific intent recognition
+        2. Extract entities (tools, locations, attributes)
+        3. Fallback to spaCy/regex if Rasa unavailable
         4. Validate command safety
         """
         if not command:
             return None
         
-        doc = self.nlp(command.lower())
-        
         command_info = {
             'intent': None,
             'target': None,
-            'parameters': {}
+            'parameters': {},
+            'entities': [],
+            'confidence': 0.0,
+            'raw_command': command
         }
         
+        # Primary: Use Rasa NLP for construction commands
+        if self.rasa_nlp:
+            try:
+                nlu_result = self.rasa_nlp.parse_construction_command(command)
+                
+                command_info['intent'] = nlu_result.intent
+                command_info['confidence'] = nlu_result.confidence
+                command_info['entities'] = nlu_result.entities
+                
+                # Extract target from entities
+                for entity in nlu_result.entities:
+                    if entity.get('entity') == 'tool_name':
+                        command_info['target'] = entity.get('value')
+                        break
+                    elif entity.get('entity') == 'location':
+                        if not command_info['target']:  # Location as fallback target
+                            command_info['target'] = entity.get('value')
+                
+                # Extract parameters from other entities
+                for entity in nlu_result.entities:
+                    entity_type = entity.get('entity')
+                    entity_value = entity.get('value')
+                    
+                    if entity_type in ['color', 'size', 'material', 'urgency']:
+                        command_info['parameters'][entity_type] = entity_value
+                    elif entity_type == 'location':
+                        command_info['parameters']['location'] = entity_value
+                
+                self.logger.info(f"🤖 Rasa NLP: {nlu_result.intent} ({nlu_result.confidence:.2f}) -> {command_info['target']}")
+                
+                if command_info['intent'] and command_info['intent'] != 'unknown':
+                    self.command_history.append(command_info)
+                    return command_info
+                    
+            except Exception as e:
+                self.logger.error(f"Rasa NLP processing failed: {e}")
+        
+        # Fallback: Use original spaCy + regex approach
+        if self.nlp:
+            try:
+                doc = self.nlp(command.lower())
+                
+                # Pattern matching fallback
+                for intent, pattern in self.command_patterns.items():
+                    match = re.search(pattern, command.lower())
+                    if match:
+                        command_info['intent'] = intent
+                        command_info['target'] = match.group(1).strip()
+                        command_info['confidence'] = 0.7
+                        break
+                
+                # Complex NLP extraction fallback
+                if not command_info['intent']:
+                    verbs = [token.lemma_ for token in doc if token.pos_ == "VERB"]
+                    if verbs:
+                        command_info['intent'] = verbs[0]
+                        command_info['confidence'] = 0.5
+                    
+                    nouns = [chunk.text for chunk in doc.noun_chunks]
+                    if nouns:
+                        command_info['target'] = nouns[-1]  # Last noun chunk is often the target
+                
+                if command_info['intent'] and command_info['target']:
+                    self.command_history.append(command_info)
+                    return command_info
+                    
+            except Exception as e:
+                self.logger.error(f"Fallback NLP processing failed: {e}")
+        
+        # Final fallback: basic pattern matching
         for intent, pattern in self.command_patterns.items():
             match = re.search(pattern, command.lower())
             if match:
                 command_info['intent'] = intent
                 command_info['target'] = match.group(1).strip()
-                break
-        
-        # If no pattern matched, try more complex NLP extraction
-        if not command_info['intent']:
-            verbs = [token.lemma_ for token in doc if token.pos_ == "VERB"]
-            if verbs:
-                command_info['intent'] = verbs[0]
-            
-            nouns = [chunk.text for chunk in doc.noun_chunks]
-            if nouns:
-                command_info['target'] = nouns[-1]  # Last noun chunk is often the target
-        
-        if command_info['intent'] and command_info['target']:
-            self.command_history.append(command_info)
-            return command_info
+                command_info['confidence'] = 0.3
+                self.command_history.append(command_info)
+                return command_info
         
         return None
 
