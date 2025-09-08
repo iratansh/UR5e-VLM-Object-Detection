@@ -1,0 +1,23 @@
+Research Questions:
+- RQ1 Trust Development: How do verbal clarification strategies affect construction worker trust when operating under cognitive load competition and expertise inversion?
+- RQ2 Communication Adaptation: How do experienced tradespeople adapt their specialized vocabulary when instructing novice robots, and what does this reveal about their mental models of robot capabilities?
+
+Hypothesis:
+- H1: Trade-Specific Terminology Increases Trust "Robots using construction jargon ('framing hammer' vs 'large hammer') will build more trust than those using visual descriptors, despite identical task performance"
+- H2: Graduated Uncertainty Expression Increases Trust
+ "Workers will trust robots MORE when expressing uncertainty graduations ('60% confident') versus binary expressions ('cannot see'), contradicting findings from service robot studies"
+- H3: Context-Aware Memory Affects Expert Trust "Robots referencing shared task history ('like the wrench from earlier') maintain trust better after failures, with stronger effects for experienced (5+ years) workers"
+
+Testing on macOS
+
+- Main System Architecture with technologies compatible macOS: Speech Input (Microphone) -> RAG Enhanced ASR -> Owl-Vit -> Backup numerical IK method (simulate UR5e joint positions to reach object and execute) 
+- Seperate Tests for testing the CoquiTTS responses for experiements based on study Research Questions: 
+    - Setup: Multiple hammers visible (claw, ball-peen, framing): Condition A: Robot uses trade terms: "Is it the framing hammer or the claw hammer?" Condition B: Robot uses descriptors: "Is it the large hammer or the curved one?" Measure: Trust ratings, response time, error recovery behavior
+    - Setup: Partially occluded tool, ambiguous visibility Condition A: Binary certainty: "I cannot see the wrench" Condition B: Graduated uncertainty: "I'm about 60% certain that's the wrench you mean" Measure: Trust maintenance after clarification, willingness to continue interaction
+    - Setup: Multi-step assembly task with repeated tool use Condition A: History-aware: "The same Phillips head we used for the bracket?" Condition B: History-naive: "Which Phillips head screwdriver?" Measure: Trust recovery after errors, differences between novice/expert workers
+
+
+Testing via main Linux System (RViz, Gazebo, MoveIt2)
+
+Main System Architecture: Speech Input (Microphone) -> RAG Enhanced ASR -> Owl-Vit (Running on RViz/Gazebo) -> Hybrid IK method (simulate UR5e joint positions to reach object and execute) -> UR5e executes user command -> Success Message via CoquiTTS
+                                                                                                                                                                                            -> UR5e doesn't execute user command -> Rely on Experimental Design for CoquiTTS (i.e Seperate Tests for testing the TTS responses for experiements based on study Research Questions Above)
