@@ -1,0 +1,14 @@
+{
+  "session_id": "P_journeyman_S1_1757292676",
+  "participant_id": "P_journeyman",
+  "condition": "treatment_context_aware",
+  "start_time": 1757292676.807563,
+  "end_time": 1757292676.807612,
+  "current_phase": "setup",
+  "tasks_completed": 0,
+  "tasks_successful": 0,
+  "total_interaction_time": 0.0,
+  "total_clarifications": 0,
+  "notes": "",
+  "technical_issues": []
+}

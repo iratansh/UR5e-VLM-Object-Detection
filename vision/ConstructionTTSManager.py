@@ -26,7 +26,15 @@ try:
     PYTTSX3_AVAILABLE = True
 except ImportError:
     PYTTSX3_AVAILABLE = False
-    logging.warning("pyttsx3 not available - TTS will use mock implementation")
+    logging.warning("pyttsx3 not available on macOS - TTS will use mock implementation (expected)")
+
+# Check CoquiTTS availability without importing (Python 3.9 compatibility issue)
+try:
+    import importlib.util
+    tts_spec = importlib.util.find_spec("TTS.api")
+    COQUI_TTS_AVAILABLE = tts_spec is not None
+except ImportError:
+    COQUI_TTS_AVAILABLE = False
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -77,18 +85,25 @@ class ConstructionTTSManager:
     def __init__(self, 
                  voice_profile: VoiceProfile = VoiceProfile.PROFESSIONAL,
                  enable_background_speech: bool = True,
-                 construction_mode: bool = True):
+                 construction_mode: bool = True,
+                 use_coqui: bool = False):
         
         self.logger = logging.getLogger(__name__)
         self.voice_profile = voice_profile
         self.enable_background_speech = enable_background_speech
         self.construction_mode = construction_mode
+        self.use_coqui = use_coqui
         
         # Speech management
         self.speech_queue = queue.Queue()
         self.is_speaking = False
         self.speech_thread = None
         self.stop_speech = False
+        
+        # TTS engines
+        self.tts_engine = None
+        self.coqui_tts = None
+        self.system_tts_available = False
         
         # Construction-specific pronunciations
         self.construction_pronunciations = {
@@ -134,11 +149,36 @@ class ConstructionTTSManager:
     def _initialize_tts_engine(self):
         """Initialize the TTS engine with construction-optimized settings"""
         
-        if not PYTTSX3_AVAILABLE:
-            self.logger.warning("TTS engine not available - using mock implementation")
-            self.tts_engine = None
-            return
+        if self.use_coqui and COQUI_TTS_AVAILABLE:
+            try:
+                # Import TTS only when needed to avoid Python 3.9 compatibility issues
+                from TTS.api import TTS
+                # Initialize CoquiTTS with a compatible model for Python 3.9
+                self.coqui_tts = TTS("tts_models/en/ljspeech/tacotron2-DDC", progress_bar=False, gpu=False)
+                self.logger.info("✅ CoquiTTS engine initialized successfully")
+                return
+            except Exception as e:
+                self.logger.error(f"Failed to initialize CoquiTTS engine: {e}")
+                self.logger.info("Falling back to system TTS...")
+                self.coqui_tts = None
         
+        # Try system TTS (macOS) as fallback
+        try:
+            import subprocess
+            result = subprocess.run(['say', '-v', '?'], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                self.system_tts_available = True
+                self.logger.info("✅ macOS system TTS available as fallback")
+                return
+        except:
+            pass
+        
+        if not PYTTSX3_AVAILABLE:
+            self.logger.warning("TTS engine not available on macOS - using mock implementation (expected)")
+            self.tts_engine = None
+            self.system_tts_available = False
+            return
+
         try:
             self.tts_engine = pyttsx3.init()
             
@@ -291,12 +331,82 @@ class ConstructionTTSManager:
         text = speech_request['text']
         voice_profile = speech_request.get('voice_profile')
         
+        # CoquiTTS implementation
+        if self.coqui_tts is not None:
+            try:
+                self.is_speaking = True
+                
+                # Generate audio with CoquiTTS
+                import tempfile
+                import os
+                import subprocess
+                
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
+                    wav_path = tmp_file.name
+                
+                # Generate speech
+                self.coqui_tts.tts_to_file(text=text, file_path=wav_path)
+                
+                # Play audio file (macOS compatible)
+                def play_audio():
+                    try:
+                        subprocess.run(['afplay', wav_path], check=True)
+                    except subprocess.CalledProcessError as e:
+                        self.logger.error(f"Failed to play CoquiTTS audio: {e}")
+                    finally:
+                        try:
+                            os.unlink(wav_path)
+                        except:
+                            pass
+                        self.is_speaking = False
+                
+                if speech_request.get('blocking', False):
+                    play_audio()
+                else:
+                    speech_thread = threading.Thread(target=play_audio, daemon=True)
+                    speech_thread.start()
+                
+                self.logger.info(f"🔊 [CoquiTTS] Speaking: '{speech_request['original_text']}'")
+                return True
+                
+            except Exception as e:
+                self.logger.error(f"CoquiTTS speech failed: {e}")
+                return False
+        
+        # System TTS implementation (macOS 'say' command)
+        if self.system_tts_available and not self.tts_engine:
+            try:
+                import subprocess
+                self.is_speaking = True
+                
+                def system_speak():
+                    try:
+                        subprocess.run(['say', text], check=True)
+                    except subprocess.CalledProcessError as e:
+                        self.logger.error(f"System TTS failed: {e}")
+                    finally:
+                        self.is_speaking = False
+                
+                if speech_request.get('blocking', False):
+                    system_speak()
+                else:
+                    speech_thread = threading.Thread(target=system_speak, daemon=True)
+                    speech_thread.start()
+                
+                self.logger.info(f"🔊 [SYSTEM TTS] Speaking: '{speech_request['original_text']}'")
+                return True
+                
+            except Exception as e:
+                self.logger.error(f"System TTS failed: {e}")
+                return False
+
+        # Original pyttsx3 implementation
         if not self.tts_engine:
             # Mock implementation for when TTS not available
             self.logger.info(f"🔊 [MOCK TTS] Speaking: '{text}'")
             time.sleep(len(text) * 0.05)  # Simulate speech duration
             return True
-        
+
         try:
             self.is_speaking = True
             
@@ -399,7 +509,10 @@ class ConstructionTTSManager:
         """Test TTS capabilities and return status information"""
         
         results = {
-            'engine_available': self.tts_engine is not None,
+            'engine_available': self.tts_engine is not None or self.system_tts_available or self.coqui_tts is not None,
+            'coqui_tts_available': self.coqui_tts is not None,
+            'system_tts_available': self.system_tts_available,
+            'pyttsx3_available': self.tts_engine is not None,
             'background_speech_enabled': self.enable_background_speech,
             'current_profile': self.voice_profile.value,
             'construction_mode': self.construction_mode,

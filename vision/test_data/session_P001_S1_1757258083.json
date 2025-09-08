@@ -1,0 +1,14 @@
+{
+  "session_id": "P001_S1_1757258083",
+  "participant_id": "P001",
+  "condition": "control_direct",
+  "start_time": 1757258083.3421261,
+  "end_time": 1757258083.342384,
+  "current_phase": "main_task",
+  "tasks_completed": 1,
+  "tasks_successful": 1,
+  "total_interaction_time": 8.5,
+  "total_clarifications": 1,
+  "notes": "",
+  "technical_issues": []
+}

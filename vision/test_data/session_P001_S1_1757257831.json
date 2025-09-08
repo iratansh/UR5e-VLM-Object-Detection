@@ -1,0 +1,14 @@
+{
+  "session_id": "P001_S1_1757257831",
+  "participant_id": "P001",
+  "condition": "treatment_confidence",
+  "start_time": 1757257831.358391,
+  "end_time": 1757257831.358621,
+  "current_phase": "main_task",
+  "tasks_completed": 1,
+  "tasks_successful": 1,
+  "total_interaction_time": 8.5,
+  "total_clarifications": 1,
+  "notes": "",
+  "technical_issues": []
+}

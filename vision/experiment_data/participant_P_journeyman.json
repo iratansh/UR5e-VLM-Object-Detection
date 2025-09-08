@@ -1,0 +1,22 @@
+{
+  "participant_id": "P_journeyman",
+  "age": null,
+  "gender": null,
+  "construction_experience_years": 5,
+  "expertise_level": "journeyman",
+  "technology_comfort": null,
+  "robot_experience": null,
+  "assigned_conditions": [
+    "treatment_context_aware",
+    "treatment_trade_specific",
+    "control_direct",
+    "treatment_confidence"
+  ],
+  "condition_order": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "enrollment_timestamp": 1757296278.70173
+}

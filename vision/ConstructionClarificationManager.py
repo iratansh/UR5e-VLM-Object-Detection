@@ -95,7 +95,8 @@ class ConstructionClarificationManager:
                  user_expertise: UserExpertiseLevel = UserExpertiseLevel.JOURNEYMAN,
                  memory_size: int = 10,
                  confidence_threshold: float = 0.7,
-                 enable_rag: bool = True):
+                 enable_rag: bool = True,
+                 enable_tts: bool = True):
         
         self.logger = logging.getLogger(__name__)
         self.default_strategy = default_strategy
@@ -103,6 +104,7 @@ class ConstructionClarificationManager:
         self.memory_size = memory_size
         self.confidence_threshold = confidence_threshold
         self.enable_rag = enable_rag
+        self.enable_tts = enable_tts
         
         # Task memory for history-aware responses
         self.task_memory: deque = deque(maxlen=memory_size)
@@ -146,17 +148,36 @@ class ConstructionClarificationManager:
         self.rag_manager = None
         if self.enable_rag:
             try:
-                from ConstructionRAGManager import ConstructionRAGManager
-                self.rag_manager = ConstructionRAGManager()
-                self.logger.info("✅ RAG integration enabled")
+                from EnhancedConstructionRAG import EnhancedConstructionRAG
+                import tempfile
+                # Create temporary directory for RAG database
+                self.rag_manager = EnhancedConstructionRAG(db_path=tempfile.mkdtemp())
+                self.logger.info("✅ Enhanced Construction RAG integration enabled")
             except ImportError as e:
-                self.logger.warning(f"RAG manager not available: {e}")
+                self.logger.warning(f"EnhancedConstructionRAG not available: {e}")
                 self.enable_rag = False
+        
+        # Initialize TTS manager if enabled
+        self.tts_manager = None
+        if self.enable_tts:
+            try:
+                from ConstructionTTSManager import ConstructionTTSManager, VoiceProfile
+                self.tts_manager = ConstructionTTSManager(
+                    voice_profile=VoiceProfile.PROFESSIONAL,
+                    enable_background_speech=True,
+                    construction_mode=True,
+                    use_coqui=False  # Use system TTS first for reliability
+                )
+                self.logger.info("✅ TTS integration enabled for construction HRI")
+            except Exception as e:
+                self.logger.warning(f"TTS not available: {e}")
+                self.enable_tts = False
         
         self.logger.info(f"✅ Construction Clarification Manager initialized")
         self.logger.info(f"   Strategy: {default_strategy.value}")
         self.logger.info(f"   User expertise: {user_expertise.value}")
         self.logger.info(f"   RAG enhancement: {'Enabled' if self.rag_manager else 'Disabled'}")
+        self.logger.info(f"   TTS enabled: {'CoquiTTS' if self.tts_manager else 'Disabled'}")
 
     def request_clarification(self, 
                             tool_request: str,

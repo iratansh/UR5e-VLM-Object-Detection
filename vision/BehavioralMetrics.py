@@ -786,6 +786,54 @@ class ConstructionBehavioralMetrics:
         self.logger.info(f"   Events: {len(export_data['events'])}")
         self.logger.info(f"   Metrics: {len(export_data['metrics'])}")
 
+    def record_error_recovery(self, participant_id: str, session_id: str,
+                            recovery_strategy: str, recovery_time: float,
+                            success: bool = True) -> str:
+        """
+        Record error recovery behavior and time.
+        
+        Parameters
+        ----------
+        participant_id : str
+            Participant identifier
+        session_id : str
+            Session identifier
+        recovery_strategy : str
+            Strategy used for error recovery
+        recovery_time : float
+            Time taken to recover from error
+        success : bool, optional
+            Whether recovery was successful
+            
+        Returns
+        -------
+        str
+            Event ID for tracking
+        """
+        
+        event_id = f"recovery_{int(time.time() * 1000)}"
+        
+        event = BehavioralEvent(
+            event_id=event_id,
+            participant_id=participant_id,
+            session_id=session_id,
+            event_type=BehaviorType.TASK_COMPLETION,  # Reuse existing type
+            timestamp=time.time(),
+            duration=recovery_time,
+            metadata={
+                'recovery_strategy': recovery_strategy,
+                'recovery_success': success,
+                'error_recovery': True
+            }
+        )
+        
+        self._add_event(event)
+        
+        if self.real_time_analysis:
+            self.logger.info(f"🔄 Error recovery: {recovery_strategy} in {recovery_time:.1f}s")
+        
+        return event_id
+
     def get_statistics(self) -> Dict[str, Any]:
         """Get overall behavioral statistics"""
         

@@ -39,6 +39,13 @@ try:
 except ImportError as e:
     logging.warning(f"Some experimental components not available: {e}")
     COMPONENTS_AVAILABLE = False
+except Exception as e:
+    # Handle pydantic version compatibility issues
+    if "GetCoreSchemaHandler" in str(e):
+        logging.warning("Pydantic version compatibility - using fallback implementations")
+    else:
+        logging.warning(f"Research components not fully available - using mock implementations: {e}")
+    COMPONENTS_AVAILABLE = False
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -49,6 +56,8 @@ class ExperimentCondition(Enum):
     TREATMENT_HISTORY = "treatment_history"              # History-aware clarification
     TREATMENT_OPTIONS = "treatment_options"              # Options-based clarification
     TREATMENT_ADAPTIVE = "treatment_adaptive"            # Expertise-adaptive clarification
+    TREATMENT_TRADE_SPECIFIC = "treatment_trade_specific"  # Trade-specific terminology (H1)
+    TREATMENT_CONTEXT_AWARE = "treatment_context_aware"    # Context-aware memory (H3)
 
 class ExperimentPhase(Enum):
     """Phases of experimental session"""
@@ -70,6 +79,7 @@ class ExperimentalDesign:
     session_duration_minutes: int = 45
     tasks_per_condition: int = 8
     rest_breaks: bool = True
+    randomization_seed: Optional[int] = None  # Added for reproducible macOS test harness
     
 @dataclass  
 class ParticipantProfile:
@@ -199,6 +209,13 @@ class ConstructionExperimentalController:
         """
         
         self.experimental_design = experimental_design
+        # Apply reproducible seeding if provided
+        if getattr(experimental_design, 'randomization_seed', None) is not None:
+            try:
+                random.seed(experimental_design.randomization_seed)
+                self.logger.info(f"🔒 Randomization seed set: {experimental_design.randomization_seed}")
+            except Exception as e:
+                self.logger.warning(f"Could not set randomization seed: {e}")
         
         self.logger.info(f"🔬 Experimental design configured")
         self.logger.info(f"   Conditions: {len(experimental_design.conditions)}")

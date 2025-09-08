@@ -18,14 +18,21 @@ from typing import List, Tuple, Optional, Dict
 import threading
 import numpy as np
 import re
-import spacy
-from transformers import pipeline
-import sys
-import whisper
-import sounddevice as sd
+import warnings
 import tempfile
 import wave
 import io
+import sys
+
+# Suppress known compatibility warnings
+warnings.filterwarnings("ignore", message=".*TypedStorage is deprecated.*")
+warnings.filterwarnings("ignore", message=".*Model.*was trained with spaCy.*")
+warnings.filterwarnings("ignore", message=".*weights.*were not initialized.*")
+
+import spacy
+from transformers import pipeline
+import whisper
+import sounddevice as sd
 
 logging.basicConfig(level=logging.INFO)
 
@@ -128,7 +135,10 @@ class SpeechCommandProcessor:
                 self.logger.info("Downloaded and loaded spaCy model: en_core_web_sm")
             
             try:
-                self.intent_classifier = pipeline("text-classification", model=model_name, use_gpu=use_gpu)
+                # Suppress transformers warnings during pipeline creation
+                import transformers
+                transformers.logging.set_verbosity_error()
+                self.intent_classifier = pipeline("text-classification", model=model_name, device=-1)  # Force CPU to avoid GPU warnings
                 self.logger.info(f"Loaded intent classifier: {model_name} as fallback")
             except Exception as e:
                 self.logger.warning(f"Could not load intent classifier: {e}")
@@ -141,6 +151,73 @@ class SpeechCommandProcessor:
             self.intent_classifier = None
         
         self.command_history = []
+        # Precompiled patterns for construction lingo normalization
+        self._dimension_lumber_pattern = re.compile(r"(\b(?:one|two|three|four|five|six|seven|eight|nine|ten|\d)\s*(?:x|by|\-)?\s*(?:one|two|three|four|five|six|seven|eight|nine|ten|\d)\b)")
+        self._word_to_num = {
+            'one': '1', 'two': '2', 'three': '3', 'four': '4', 'five': '5',
+            'six': '6', 'seven': '7', 'eight': '8', 'nine': '9', 'ten': '10'
+        }
+        self._fraction_pattern = re.compile(r"(\b(?:one|two|three|four|five|six|seven|eight|nine|ten|\d)\s*(?:/|\s+over\s+)\s*(?:one|two|three|four|five|six|seven|eight|nine|ten|\d)\b)")
+        self._multi_word_materials = {
+            'three quarter inch plywood': '3/4 inch plywood',
+            'half inch plywood': '1/2 inch plywood',
+            'quarter inch plywood': '1/4 inch plywood'
+        }
+
+    def normalize_construction_lingo(self, text: str) -> str:
+        """Normalize construction site lingo into canonical detection-friendly forms.
+
+        Examples:
+        - "two by four" -> "2x4"
+        - "2 by 4" -> "2x4"
+        - "three quarter inch plywood" -> "3/4 inch plywood"
+        - "grab the two-by-four next to the saw" -> "grab the 2x4 next to the saw"
+
+        This helps downstream OWL-ViT query expansion and RAG retrieval.
+        """
+        if not text:
+            return text
+        original = text
+        lowered = text.lower()
+
+        # Multi-word material standardization (e.g., thickness + material)
+        for phrase, canonical in self._multi_word_materials.items():
+            if phrase in lowered:
+                lowered = lowered.replace(phrase, canonical)
+
+        # Dimension lumber normalization (two by four => 2x4)
+        def _normalize_dimension(match: re.Match) -> str:
+            token = match.group(1)
+            parts = re.split(r"x|by|\-", token)
+            if len(parts) == 2:
+                a, b = parts
+                a = a.strip()
+                b = b.strip()
+                a_num = self._word_to_num.get(a, a)
+                b_num = self._word_to_num.get(b, b)
+                if a_num.isdigit() and b_num.isdigit():
+                    return f"{a_num}x{b_num}"
+            return token
+
+        lowered = self._dimension_lumber_pattern.sub(_normalize_dimension, lowered)
+
+        # Fractions (one over two -> 1/2)
+        def _normalize_fraction(m: re.Match) -> str:
+            frac = m.group(1)
+            parts = re.split(r"/|over", frac)
+            if len(parts) == 2:
+                a = parts[0].strip()
+                b = parts[1].strip()
+                a_num = self._word_to_num.get(a, a)
+                b_num = self._word_to_num.get(b, b)
+                if a_num.isdigit() and b_num.isdigit():
+                    return f"{a_num}/{b_num}"
+            return frac
+
+        lowered = self._fraction_pattern.sub(_normalize_fraction, lowered)
+
+        # Return with original casing preserved only if unchanged
+        return lowered
         
     def _record_audio(self, duration: float = None) -> np.ndarray:
         """
@@ -325,19 +402,25 @@ class SpeechCommandProcessor:
         if not command:
             return None
         
+        # Normalize construction lingo early so NLU & detection get canonical forms
+        normalized_command = self.normalize_construction_lingo(command)
+
         command_info = {
             'intent': None,
             'target': None,
             'parameters': {},
             'entities': [],
             'confidence': 0.0,
-            'raw_command': command
+            'raw_command': command,
+            'normalized_command': normalized_command
         }
         
         # Primary: Use Rasa NLP for construction commands
         if self.rasa_nlp:
             try:
-                nlu_result = self.rasa_nlp.parse_construction_command(command)
+                # Feed normalized form to Rasa if it differs (fallback to raw if needed)
+                parse_input = normalized_command if normalized_command != command else command
+                nlu_result = self.rasa_nlp.parse_construction_command(parse_input)
                 
                 command_info['intent'] = nlu_result.intent
                 command_info['confidence'] = nlu_result.confidence
@@ -374,11 +457,11 @@ class SpeechCommandProcessor:
         # Fallback: Use original spaCy + regex approach
         if self.nlp:
             try:
-                doc = self.nlp(command.lower())
+                doc = self.nlp(normalized_command.lower())
                 
                 # Pattern matching fallback
                 for intent, pattern in self.command_patterns.items():
-                    match = re.search(pattern, command.lower())
+                    match = re.search(pattern, normalized_command.lower())
                     if match:
                         command_info['intent'] = intent
                         command_info['target'] = match.group(1).strip()
@@ -405,7 +488,7 @@ class SpeechCommandProcessor:
         
         # Final fallback: basic pattern matching
         for intent, pattern in self.command_patterns.items():
-            match = re.search(pattern, command.lower())
+            match = re.search(pattern, normalized_command.lower())
             if match:
                 command_info['intent'] = intent
                 command_info['target'] = match.group(1).strip()
