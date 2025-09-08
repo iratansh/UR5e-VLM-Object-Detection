@@ -1,0 +1,140 @@
+services:
+  ur5e-vlm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        USERNAME: ur5e_user
+        USER_UID: 1000
+        USER_GID: 1000
+    image: ur5e-vlm:latest
+    container_name: ur5e-vlm-container
+    
+    # Enable GPU access
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    # Alternative GPU runtime (if deploy doesn't work)
+    runtime: nvidia
+    
+    # Environment variables
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - ROS_DOMAIN_ID=0
+      - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+    
+    # Network configuration
+    network_mode: host
+    
+    # IPC and PID settings for GUI applications
+    ipc: host
+    pid: host
+    
+    # Privileged mode for hardware access
+    privileged: true
+    
+    # Volume mounts
+    volumes:
+      # X11 forwarding for GUI applications (RViz, Gazebo)
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - /home/${USER}/.Xauthority:/home/ur5e_user/.Xauthority:rw
+      
+      # Mount the project directory
+      - .:/home/ur5e_user/workspace:rw
+      
+      # Device access
+      - /dev:/dev:rw
+      
+      # Audio system
+      - /run/user/1000/pulse:/run/user/1000/pulse:rw
+      - /var/lib/dbus:/var/lib/dbus:ro
+      - /run/dbus:/run/dbus:ro
+      
+      # USB and hardware
+      - /sys:/sys:rw
+      - /run/udev:/run/udev:ro
+      
+      # Shared memory for performance
+      - /dev/shm:/dev/shm:rw
+      
+      # Optional: Mount host's conda/pip cache to speed up builds
+      - ${HOME}/.cache/pip:/home/ur5e_user/.cache/pip:rw
+    
+    # Device access for USB, cameras, audio
+    devices:
+      - /dev/video0:/dev/video0  # Camera devices
+      - /dev/video1:/dev/video1
+      - /dev/video2:/dev/video2
+      - /dev/video3:/dev/video3
+      - /dev/snd:/dev/snd        # Audio devices
+      - /dev/dri:/dev/dri        # GPU devices
+      - /dev/ttyUSB0:/dev/ttyUSB0  # Serial devices
+      - /dev/ttyACM0:/dev/ttyACM0  # Arduino/microcontroller
+    
+    # Working directory
+    working_dir: /home/ur5e_user/workspace
+    
+    # Keep container running
+    tty: true
+    stdin_open: true
+    
+    # Restart policy
+    restart: unless-stopped
+
+  # Optional: Separate service for Gazebo simulation
+  gazebo-sim:
+    image: ur5e-vlm:latest
+    container_name: ur5e-gazebo-sim
+    depends_on:
+      - ur5e-vlm
+    
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - ROS_DOMAIN_ID=0
+      - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+    
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    runtime: nvidia
+    network_mode: host
+    ipc: host
+    
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - /home/${USER}/.Xauthority:/home/ur5e_user/.Xauthority:rw
+      - .:/home/ur5e_user/workspace:rw
+      - /dev/shm:/dev/shm:rw
+    
+    working_dir: /home/ur5e_user/workspace
+    
+    # Command to run Gazebo simulation
+    command: >
+      bash -c "
+      source /opt/ros/humble/setup.bash && 
+      eval '$$(conda shell.bash hook)' && 
+      conda activate ur5e_vlm_environment && 
+      ros2 launch gazebo_ros gazebo.launch.py world:=/home/ur5e_user/workspace/vision/worlds/ur5e_world.sdf
+      "
+    
+    profiles: ["simulation"]  # Only start with --profile simulation
+
+networks:
+  default:
+    driver: bridge
