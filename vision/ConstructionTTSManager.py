@@ -86,7 +86,7 @@ class ConstructionTTSManager:
                  voice_profile: VoiceProfile = VoiceProfile.PROFESSIONAL,
                  enable_background_speech: bool = True,
                  construction_mode: bool = True,
-                 use_coqui: bool = False):
+                 use_coqui: bool = True):
         
         self.logger = logging.getLogger(__name__)
         self.voice_profile = voice_profile

@@ -1,0 +1,120 @@
+name: ur-vlm-py310
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - numpy>=1.26.4
+  - scipy>=1.10.1
+  - pandas
+  - matplotlib>=3.5.3
+  - opencv
+  - pip:
+      # === CORE HRI SYSTEM TECHNOLOGIES ===
+
+      # 🧠 Neural TTS (CoquiTTS) - WORKING ✅
+      - coqui-tts==0.27.1
+      - coqui-tts-trainer==0.3.1
+
+      # 🔍 Modern NLP Framework (Haystack) - WORKING ✅
+      - haystack-ai==2.17.1
+      - haystack-experimental==0.13.0
+
+      # 🔤 Traditional NLP (Rasa) - Legacy Support
+      - rasa==3.6.16
+
+      # 💾 Vector Database (ChromaDB) - WORKING ✅
+      - chromadb==1.0.20
+
+      # 🤖 Sentence Embeddings (SentenceTransformers) - WORKING ✅
+      - sentence-transformers==5.1.0
+
+      # 🎤 Speech Recognition (OpenAI Whisper) - WORKING ✅
+      - openai-whisper==20250625
+
+      # 🔤 NLP Processing (spaCy) - WORKING ✅
+      - spacy==3.8.7
+      - spacy-legacy==3.0.12
+      - spacy-loggers==1.0.5
+
+      # 🤖 Transformer Models (HuggingFace) - WORKING ✅
+      - transformers==4.56.1
+      - tokenizers
+      - datasets
+
+      # === DEEP LEARNING & COMPUTER VISION ===
+
+      # Deep Learning
+      - torch>=2.8.0
+      - torchaudio>=2.8.0
+      - torchvision
+
+      # Computer Vision
+      - opencv-python==4.8.1.78
+
+      # === AUDIO PROCESSING ===
+
+      # Audio I/O and Processing
+      - sounddevice==0.5.2
+      - soundfile
+      - librosa
+      - pyttsx3
+
+      # === ROBOTICS & VISION INTEGRATION ===
+
+      # 📷 Intel RealSense (for production deployment)
+      - pyrealsense2
+
+      # 🤖 Robotics Utilities
+      - robotics-toolbox-python
+      - spatialmath-python
+
+      # === RESEARCH & ANALYSIS TOOLS ===
+
+      # Data Visualization
+      - seaborn
+      - plotly
+      - bokeh
+
+      # Statistical Analysis
+      - scikit-learn
+      - statsmodels
+      - pingouin
+
+      # Psychological Assessment Tools
+      - psychopy
+
+      # === DATA MANAGEMENT & VALIDATION ===
+
+      # Data Validation
+      - pydantic==2.11.9
+      - typing_extensions==4.15.0
+
+      # File & Data Management
+      - h5py
+      - xlsxwriter
+      - openpyxl
+
+      # === API & WEB INTEGRATION ===
+
+      # API & Web Integration
+      - requests
+      - fastapi
+      - uvicorn
+
+      # === DEVELOPMENT & TESTING ===
+
+      # Development & Testing
+      - pytest
+      - pytest-asyncio
+      - pytest-mock
+      - jupyter
+      - ipython
+
+      # Code Quality
+      - black
+      - flake8
+
+      # Legacy packaging support
+      - packaging==21.3

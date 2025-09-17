@@ -109,18 +109,19 @@ class SpeechCommandProcessor:
             self.logger.error(f"Failed to load Whisper model: {e}")
             raise
         
-        # Initialize Rasa NLP for construction-specific intent recognition
+        # Initialize Haystack NLP for construction-specific intent recognition
         try:
-            from ConstructionRasaNLP import ConstructionRasaNLP
-            self.rasa_nlp = ConstructionRasaNLP(
+            from ConstructionHaystackNLP import ConstructionHaystackNLP
+            self.haystack_nlp = ConstructionHaystackNLP(
+                model_name="all-mpnet-base-v2",
                 confidence_threshold=0.6
             )
-            self.logger.info("✅ Rasa NLP initialized for construction commands")
+            self.logger.info("✅ Haystack NLP initialized for construction commands")
         except ImportError as e:
-            self.logger.warning(f"Rasa NLP not available: {e}")
-            self.rasa_nlp = None
+            self.logger.warning(f"Haystack NLP not available: {e}")
+            self.haystack_nlp = None
         
-        # Fallback to spaCy + transformers if Rasa fails
+        # Fallback to spaCy + transformers if Haystack fails
         try:
             # Try to load the spaCy model
             try:
@@ -329,7 +330,7 @@ class SpeechCommandProcessor:
     
     def parse_object_query(self, command: str) -> List[str]:
         """
-        Extract object queries from command text using Rasa NLP.
+        Extract object queries from command text using Haystack NLP.
         
         Parameters
         ----------
@@ -351,15 +352,15 @@ class SpeechCommandProcessor:
         
         queries = []
         
-        # Primary: Use Rasa NLP for tool extraction
-        if self.rasa_nlp:
+        # Primary: Use Haystack NLP for tool extraction
+        if self.haystack_nlp:
             try:
-                tool_references = self.rasa_nlp.extract_tool_references(command)
+                tool_references = self.haystack_nlp.extract_tool_references(command)
                 if tool_references:
                     queries.extend(tool_references)
                     return queries
             except Exception as e:
-                self.logger.error(f"Rasa tool extraction failed: {e}")
+                self.logger.error(f"Haystack tool extraction failed: {e}")
         
         # Fallback: Use original pattern matching
         for pattern in self.command_patterns.values():
@@ -373,7 +374,7 @@ class SpeechCommandProcessor:
 
     def process_command(self, command: str) -> Optional[Dict]:
         """
-        Process a natural language command using Rasa NLP.
+        Process a natural language command using Haystack NLP.
         
         Parameters
         ----------
@@ -394,9 +395,9 @@ class SpeechCommandProcessor:
         Notes
         -----
         Processing steps:
-        1. Use Rasa NLP for construction-specific intent recognition
+        1. Use Haystack NLP for construction-specific intent recognition
         2. Extract entities (tools, locations, attributes)
-        3. Fallback to spaCy/regex if Rasa unavailable
+        3. Fallback to spaCy/regex if Haystack unavailable
         4. Validate command safety
         """
         if not command:
@@ -415,12 +416,12 @@ class SpeechCommandProcessor:
             'normalized_command': normalized_command
         }
         
-        # Primary: Use Rasa NLP for construction commands
-        if self.rasa_nlp:
+        # Primary: Use Haystack NLP for construction commands
+        if self.haystack_nlp:
             try:
-                # Feed normalized form to Rasa if it differs (fallback to raw if needed)
+                # Feed normalized form to Haystack if it differs (fallback to raw if needed)
                 parse_input = normalized_command if normalized_command != command else command
-                nlu_result = self.rasa_nlp.parse_construction_command(parse_input)
+                nlu_result = self.haystack_nlp.parse_construction_command(parse_input)
                 
                 command_info['intent'] = nlu_result.intent
                 command_info['confidence'] = nlu_result.confidence
@@ -445,14 +446,14 @@ class SpeechCommandProcessor:
                     elif entity_type == 'location':
                         command_info['parameters']['location'] = entity_value
                 
-                self.logger.info(f"🤖 Rasa NLP: {nlu_result.intent} ({nlu_result.confidence:.2f}) -> {command_info['target']}")
+                self.logger.info(f"🤖 Haystack NLP: {nlu_result.intent} ({nlu_result.confidence:.2f}) -> {command_info['target']}")
                 
                 if command_info['intent'] and command_info['intent'] != 'unknown':
                     self.command_history.append(command_info)
                     return command_info
                     
             except Exception as e:
-                self.logger.error(f"Rasa NLP processing failed: {e}")
+                self.logger.error(f"Haystack NLP processing failed: {e}")
         
         # Fallback: Use original spaCy + regex approach
         if self.nlp:
@@ -618,6 +619,13 @@ class SpeechCommandProcessor:
         including stopping the listening thread and releasing Whisper model.
         """
         self.stop_listening()
+        
+        # Clean up Haystack NLP resources
+        if hasattr(self, 'haystack_nlp') and self.haystack_nlp:
+            try:
+                self.haystack_nlp.cleanup()
+            except Exception as e:
+                logging.error(f"Error cleaning up Haystack NLP: {e}")
         
         # Clear Whisper model from memory if needed
         if hasattr(self, 'whisper_model'):

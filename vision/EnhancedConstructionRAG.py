@@ -785,8 +785,21 @@ class EnhancedConstructionRAG:
                     response += "Which specific one do you need?"
             else:
                 # More concise for experienced workers (foreman/master)
-                response = f"I see {len(detected_objects)} {self._extract_target_from_request(original_request)}s. "
-                response += "Which one - " + " or ".join([desc.split()[0] for desc in object_descriptions]) + "?"
+                target_name = self._extract_target_from_request(original_request)
+                response = f"I see {len(detected_objects)} {target_name}s. "
+                
+                # Extract the actual tool names, not just the first word
+                tool_names = []
+                for desc in object_descriptions:
+                    if desc.startswith("what appears to be a "):
+                        # Extract the tool name after "what appears to be a "
+                        tool_name = desc.replace("what appears to be a ", "").split(" on")[0].split(" to")[0]
+                    else:
+                        # Direct tool name
+                        tool_name = desc.split(" on")[0].split(" to")[0]  # Remove position info
+                    tool_names.append(tool_name)
+                
+                response += "Which one - " + " or ".join(tool_names) + "?"
             
             # Add relevant context from knowledge base
             target = self._extract_target_from_request(original_request)

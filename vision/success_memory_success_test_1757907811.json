@@ -1,0 +1,59 @@
+{
+  "task_memory": [
+    {
+      "tool_name": "hammer",
+      "action": "retrieved",
+      "success": true,
+      "confidence": 1.0,
+      "timestamp": 1757907815.263038,
+      "user_feedback": null,
+      "strategy_used": "confidence_based"
+    },
+    {
+      "tool_name": "screwdriver",
+      "action": "failed_after_retry",
+      "success": false,
+      "confidence": 1.0,
+      "timestamp": 1757907815.359008,
+      "user_feedback": null,
+      "strategy_used": "confidence_based"
+    },
+    {
+      "tool_name": "level",
+      "action": "retrieved",
+      "success": true,
+      "confidence": 1.0,
+      "timestamp": 1757907815.375107,
+      "user_feedback": null,
+      "strategy_used": "confidence_based"
+    },
+    {
+      "tool_name": "drill",
+      "action": "retrieved",
+      "success": true,
+      "confidence": 1.0,
+      "timestamp": 1757907815.390319,
+      "user_feedback": null,
+      "strategy_used": "confidence_based"
+    },
+    {
+      "tool_name": "saw",
+      "action": "failed_after_retry",
+      "success": false,
+      "confidence": 1.0,
+      "timestamp": 1757907815.5259461,
+      "user_feedback": null,
+      "strategy_used": "confidence_based"
+    },
+    {
+      "tool_name": "wrench",
+      "action": "retrieved",
+      "success": true,
+      "confidence": 1.0,
+      "timestamp": 1757907815.5484061,
+      "user_feedback": null,
+      "strategy_used": "confidence_based"
+    }
+  ],
+  "last_updated": 1757907815.5488262
+}

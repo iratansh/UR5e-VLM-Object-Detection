@@ -16,9 +16,11 @@ expertise inversion scenarios in construction robotics.
 import logging
 import random
 import time
+import json
+import os
 from typing import List, Tuple, Optional, Dict, Any, Union
 from enum import Enum
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from collections import deque
 import json
 
@@ -96,7 +98,8 @@ class ConstructionClarificationManager:
                  memory_size: int = 10,
                  confidence_threshold: float = 0.7,
                  enable_rag: bool = True,
-                 enable_tts: bool = True):
+                 enable_tts: bool = True,
+                 memory_file: Optional[str] = None):
         
         self.logger = logging.getLogger(__name__)
         self.default_strategy = default_strategy
@@ -106,8 +109,10 @@ class ConstructionClarificationManager:
         self.enable_rag = enable_rag
         self.enable_tts = enable_tts
         
-        # Task memory for history-aware responses
+        # Task memory for history-aware responses with persistence
+        self.memory_file = memory_file or "task_memory.json"
         self.task_memory: deque = deque(maxlen=memory_size)
+        self._load_task_memory()
         
         # Interaction tracking for research metrics
         self.interaction_count = 0
@@ -144,40 +149,59 @@ class ConstructionClarificationManager:
             "punch list": "final cleanup and correction tasks"
         }
         
-        # Initialize RAG manager if enabled
+        # Initialize RAG manager if enabled (using shared singleton)
         self.rag_manager = None
         if self.enable_rag:
             try:
-                from EnhancedConstructionRAG import EnhancedConstructionRAG
-                import tempfile
-                # Create temporary directory for RAG database
-                self.rag_manager = EnhancedConstructionRAG(db_path=tempfile.mkdtemp())
-                self.logger.info("✅ Enhanced Construction RAG integration enabled")
+                from SharedRAGManager import get_shared_rag_manager
+                self.rag_manager = get_shared_rag_manager()
+                if self.rag_manager:
+                    self.logger.info("✅ Enhanced Construction RAG integration enabled (shared)")
+                else:
+                    self.logger.warning("Failed to get shared RAG manager")
+                    self.enable_rag = False
             except ImportError as e:
-                self.logger.warning(f"EnhancedConstructionRAG not available: {e}")
+                self.logger.warning(f"SharedRAGManager not available: {e}")
                 self.enable_rag = False
         
-        # Initialize TTS manager if enabled
+        # Initialize TTS manager if enabled (using shared singleton)
         self.tts_manager = None
         if self.enable_tts:
             try:
-                from ConstructionTTSManager import ConstructionTTSManager, VoiceProfile
-                self.tts_manager = ConstructionTTSManager(
+                from SharedTTSManager import get_shared_tts_manager
+                from ConstructionTTSManager import VoiceProfile
+                self.tts_manager = get_shared_tts_manager(
                     voice_profile=VoiceProfile.PROFESSIONAL,
                     enable_background_speech=True,
                     construction_mode=True,
-                    use_coqui=False  # Use system TTS first for reliability
+                    use_coqui=True  # Use CoquiTTS for neural synthesis
                 )
-                self.logger.info("✅ TTS integration enabled for construction HRI")
+                if self.tts_manager:
+                    self.logger.info("✅ TTS integration enabled for construction HRI (shared)")
+                else:
+                    self.logger.warning("Failed to get shared TTS manager")
+                    self.enable_tts = False
             except Exception as e:
-                self.logger.warning(f"TTS not available: {e}")
+                self.logger.warning(f"SharedTTSManager not available: {e}")
                 self.enable_tts = False
         
         self.logger.info(f"✅ Construction Clarification Manager initialized")
         self.logger.info(f"   Strategy: {default_strategy.value}")
         self.logger.info(f"   User expertise: {user_expertise.value}")
         self.logger.info(f"   RAG enhancement: {'Enabled' if self.rag_manager else 'Disabled'}")
-        self.logger.info(f"   TTS enabled: {'CoquiTTS' if self.tts_manager else 'Disabled'}")
+        # Determine actual TTS engine being used
+        tts_status = "Disabled"
+        if self.tts_manager:
+            if hasattr(self.tts_manager, 'coqui_tts') and self.tts_manager.coqui_tts is not None:
+                tts_status = "CoquiTTS"
+            elif hasattr(self.tts_manager, 'system_tts_available') and self.tts_manager.system_tts_available:
+                tts_status = "System TTS"
+            elif hasattr(self.tts_manager, 'tts_engine') and self.tts_manager.tts_engine is not None:
+                tts_status = "pyttsx3"
+            else:
+                tts_status = "Mock TTS"
+        
+        self.logger.info(f"   TTS enabled: {tts_status}")
 
     def request_clarification(self, 
                             tool_request: str,
@@ -329,11 +353,11 @@ class ConstructionClarificationManager:
         
         # Single detection with history context
         if len(detected_objects) == 1:
-            current_tool = detected_objects[0].get('trade_term', detected_objects[0].get('label'))
+            current_tool = detected_objects[0].get('trade_term', detected_objects[0].get('label', detected_objects[0].get('name', 'tool')))
             
             # Check if similar tool used recently
             for mem in reversed(self.task_memory):
-                if mem.tool_name.lower() in current_tool.lower() or current_tool.lower() in mem.tool_name.lower():
+                if current_tool and mem.tool_name and mem.tool_name.lower() in current_tool.lower() or current_tool.lower() in mem.tool_name.lower():
                     return ClarificationResponse(
                         text=f"Found a {current_tool}, same type as the {mem.tool_name} we used {self._time_since(mem.timestamp)}. This the one?",
                         strategy=ClarificationStrategy.HISTORY_AWARE,
@@ -679,6 +703,7 @@ class ConstructionClarificationManager:
         )
         
         self.task_memory.append(memory)
+        self._save_task_memory()  # Persist immediately for longitudinal analysis
         self.logger.info(f"📝 Updated task memory: {tool_name} -> {action} ({'✅' if success else '❌'})")
 
     def update_user_expertise(self, new_level: UserExpertiseLevel):
@@ -745,3 +770,58 @@ class ConstructionClarificationManager:
             json.dump(data, f, indent=2)
         
         self.logger.info(f"📊 Research data exported to {filepath}")
+    
+    def _load_task_memory(self):
+        """Load task memory from persistent storage."""
+        if os.path.exists(self.memory_file):
+            try:
+                with open(self.memory_file, 'r') as f:
+                    data = json.load(f)
+                
+                for mem_data in data.get('task_memory', []):
+                    memory = TaskMemory(
+                        tool_name=mem_data['tool_name'],
+                        action=mem_data['action'],
+                        success=mem_data.get('success', True),
+                        confidence=mem_data.get('confidence', 1.0),
+                        timestamp=mem_data.get('timestamp', time.time()),
+                        user_feedback=mem_data.get('user_feedback'),
+                        strategy_used=mem_data.get('strategy_used')
+                    )
+                    self.task_memory.append(memory)
+                
+                self.logger.info(f"📁 Loaded {len(self.task_memory)} task memories from {self.memory_file}")
+                
+            except Exception as e:
+                self.logger.warning(f"Failed to load task memory: {e}")
+    
+    def _save_task_memory(self):
+        """Save task memory to persistent storage."""
+        try:
+            data = {
+                'task_memory': [
+                    {
+                        'tool_name': mem.tool_name,
+                        'action': mem.action,
+                        'success': mem.success,
+                        'confidence': mem.confidence,
+                        'timestamp': mem.timestamp,
+                        'user_feedback': mem.user_feedback,
+                        'strategy_used': mem.strategy_used
+                    } for mem in self.task_memory
+                ],
+                'last_updated': time.time()
+            }
+            
+            with open(self.memory_file, 'w') as f:
+                json.dump(data, f, indent=2)
+                
+            self.logger.debug(f"💾 Saved {len(self.task_memory)} task memories to {self.memory_file}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to save task memory: {e}")
+    
+    def cleanup(self):
+        """Clean up resources and save persistent data."""
+        self._save_task_memory()
+        self.logger.info("🧹 ConstructionClarificationManager cleaned up")
